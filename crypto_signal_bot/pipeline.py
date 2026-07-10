@@ -16,6 +16,7 @@ from crypto_signal_bot.config import (
     INTERVAL,
     MIN_ROWS_FOR_TRAINING,
 )
+from crypto_signal_bot.data.derivatives import merge_derivatives
 from crypto_signal_bot.data.fetcher import fetch_ohlcv
 from crypto_signal_bot.data.storage import load_processed, save_parquet
 from crypto_signal_bot.features.dataset import build_and_save
@@ -58,6 +59,7 @@ def fetch_all(
                 logger.warning("No candles for {} — skipping", symbol)
                 report.skipped.append(symbol)
                 continue
+            df = merge_derivatives(df, symbol, interval=interval, history_days=days)
             save_parquet(df, symbol, interval)
             report.ok.append(symbol)
         except Exception as exc:  # keep the batch alive

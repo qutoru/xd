@@ -24,6 +24,7 @@ _RSI_PERIOD = 14
 _BB_PERIOD = 20
 _BB_STD = 2.0
 _VOLUME_Z_WINDOW = 48
+_OI_Z_WINDOW = 96  # ~1 day of 15m bars for OI/funding standardization
 
 # Bars per day at 15m resolution, used for cyclical time-of-day features.
 _BARS_PER_DAY = 96
@@ -145,6 +146,31 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     angle = 2.0 * np.pi * bar_of_day / _BARS_PER_DAY
     feats["tod_sin"] = np.sin(angle)
     feats["tod_cos"] = np.cos(angle)
+
+    # --- Derivatives context: open interest (positioning) -------------------
+    # Guarded so single-symbol / legacy datasets without these columns still
+    # build. OI level is not comparable across symbols, so we use changes and a
+    # standardized z-score instead of the raw value.
+    if "open_interest" in df.columns:
+        oi = df["open_interest"]
+        feats["oi_chg_4"] = oi.pct_change(4)
+        feats["oi_chg_16"] = oi.pct_change(16)
+        feats["oi_chg_96"] = oi.pct_change(96)
+        oi_mean = oi.rolling(_OI_Z_WINDOW).mean()
+        oi_std = oi.rolling(_OI_Z_WINDOW).std()
+        feats["oi_z"] = (oi - oi_mean) / oi_std
+        # OI up while price up = fresh longs; OI up while price down = fresh
+        # shorts. Interaction of OI change with return sign captures this.
+        feats["oi_price_div"] = np.sign(oi.pct_change(4)) * np.sign(log_ret)
+
+    # --- Derivatives context: funding rate (sentiment) ----------------------
+    if "funding_rate" in df.columns:
+        fr = df["funding_rate"]
+        feats["funding"] = fr
+        feats["funding_sign"] = np.sign(fr)
+        fr_mean = fr.rolling(_OI_Z_WINDOW).mean()
+        fr_std = fr.rolling(_OI_Z_WINDOW).std()
+        feats["funding_z"] = (fr - fr_mean) / fr_std
 
     out = pd.DataFrame(feats, index=df.index)
     # Guard against inf produced by divisions on degenerate bars.

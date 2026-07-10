@@ -6,7 +6,7 @@ Telegram). **Без автоисполнения ордеров.**
 ## Общий план фаз
 - [x] **Фаза 1** — Каркас проекта + сбор данных с Bybit
 - [x] **Фаза 2** — Feature engineering + разметка
-- [ ] Фаза 3 — Обучение модели + базовые метрики
+- [x] **Фаза 3** — Обучение модели + базовые метрики
 - [ ] Фаза 4 — Бэктест без риск-менеджмента
 - [ ] Фаза 5 — Риск-менеджмент (SL/TP, position sizing) + бэктест v2
 - [ ] Фаза 6 — Telegram-уведомления
@@ -85,6 +85,44 @@ py main.py build
 flat 32.0% / long 32.5%.
 
 ### Что осталось / заметки на будущее
-- Фичи и `ATR_MULT`/горизонт можно тюнить в Фазе 3 по метрикам.
+- Фичи и `ATR_MULT`/горизонт можно тюнить по метрикам.
 - При обучении важен временной сплит (no shuffle) — данные автокоррелированы,
-  плюс метки перекрываются на горизонте (учесть при валидации/purging).
+  плюс метки перекрываются на горизонте (реализовано в Фазе 3: purging).
+
+---
+
+## Фаза 3 — Обучение модели + базовые метрики ✅
+
+### Решения
+- Модель: **LightGBM multiclass** (3 класса short/flat/long), `class_weight=balanced`.
+- Сплит: **хронологический** 70/15/15 без shuffle. Между сегментами — **purging**:
+  из хвоста train и valid убирается `EMBARGO=HORIZON` баров, чтобы forward-метка
+  не заглядывала в следующий сегмент.
+- Early stopping по valid `multi_logloss` (`EARLY_STOPPING_ROUNDS=100`).
+- Метрики: accuracy, macro-F1, per-class P/R/F1, confusion matrix + majority-baseline.
+
+### Что сделано
+- `crypto_signal_bot/model/splits.py` — `time_split()` (purged chronological).
+- `crypto_signal_bot/model/metrics.py` — `evaluate()` / `log_report()`.
+- `crypto_signal_bot/model/train.py` — `train()`: load processed → split → fit
+  (early stopping) → оценка valid/test → сохранение booster (`models/SYMBOL_INT.txt`)
+  + метаданные (`*_meta.json`: фичи, params, метрики, best_iteration).
+- `config.py` — `RANDOM_SEED`, `TRAIN_FRAC`/`VALID_FRAC`, `EMBARGO`, `LGBM_PARAMS`,
+  `CLASS_ORDER`/`CLASS_NAMES`.
+- `main.py` — команда `train`. `requirements.txt` — lightgbm, scikit-learn.
+- `.gitignore` — `models/*.txt`, `models/*_meta.json` (генерируемые артефакты).
+
+### Как запустить/проверить
+```bash
+py main.py train
+```
+Результат (26 фич, split train=11943 / valid=2553 / test=2561, best_iter=68):
+- **test:** accuracy **0.401** (baseline 0.357 = always short), macro-F1 **0.402**.
+- Модель предсказывает все 3 класса (не вырождается). Преимущество над baseline
+  скромное (~+4 п.п.) — ожидаемо для сырого direction-прогноза; это базовая точка.
+
+### Что осталось / заметки на будущее
+- Улучшения: доп. фичи, тюнинг гиперпараметров, порог по вероятности (торговать
+  только уверенные сигналы), walk-forward валидация вместо одного сплита.
+- Ключевой вопрос — не accuracy, а прибыльность после комиссий: проверим в
+  Фазе 4 (бэктест).

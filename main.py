@@ -3,6 +3,7 @@
 Usage:
     py main.py fetch
     py main.py build
+    py main.py train
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from crypto_signal_bot.config import HISTORY_DAYS, INTERVAL, SYMBOL
 from crypto_signal_bot.data.fetcher import fetch_ohlcv
 from crypto_signal_bot.data.storage import save_parquet
 from crypto_signal_bot.features.dataset import build_and_save
+from crypto_signal_bot.model.train import train as train_model
 
 
 def cmd_fetch(_args: argparse.Namespace) -> int:
@@ -59,6 +61,23 @@ def cmd_build(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_train(_args: argparse.Namespace) -> int:
+    """Train the LightGBM signal model and persist it with its metrics.
+
+    Returns:
+        Process exit code (always 0 on a successful run).
+    """
+    logger.info("Training model for {} {}m", SYMBOL, INTERVAL)
+    meta = train_model(SYMBOL, INTERVAL)
+    test = meta["test_metrics"]
+    logger.success(
+        "Trained model — test accuracy={:.3f} macro_f1={:.3f}",
+        test["accuracy"],
+        test["macro_f1"],
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -76,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
         "build", help="Build features + triple-barrier labels from raw OHLCV."
     )
     build_parser.set_defaults(func=cmd_build)
+
+    train_parser = subparsers.add_parser(
+        "train", help="Train the LightGBM signal model and report metrics."
+    )
+    train_parser.set_defaults(func=cmd_train)
 
     return parser
 

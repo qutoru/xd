@@ -1,0 +1,7 @@
+pybit>=5.7.0
+pandas>=2.0.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+loguru>=0.7.0
+# Required by pandas for parquet I/O (data/storage.py)
+pyarrow>=14.0.0

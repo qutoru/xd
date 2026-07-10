@@ -16,5 +16,10 @@ __pycache__/
 # Data exports
 *.csv
 
+# Fetched / generated datasets
+data/raw/
+data/processed/
+*.parquet
+
 # Trained models
 models/*.txt

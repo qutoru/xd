@@ -8,3 +8,5 @@ pyarrow>=14.0.0
 # Phase 3: modeling
 lightgbm>=4.0.0
 scikit-learn>=1.3.0
+# Phase 6: Telegram notifications
+requests>=2.31.0

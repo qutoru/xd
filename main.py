@@ -6,6 +6,7 @@ Usage:
     py main.py train
     py main.py backtest [--segment {train,valid,test}]
     py main.py backtest-rm
+    py main.py signal [--dry-run]
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from crypto_signal_bot.data.storage import save_parquet
 from crypto_signal_bot.backtest.runner import run as run_backtest
 from crypto_signal_bot.backtest.runner import run_risk_managed
 from crypto_signal_bot.features.dataset import build_and_save
+from crypto_signal_bot.live.signal import generate_signal
+from crypto_signal_bot.live.telegram import send_telegram
 from crypto_signal_bot.model.train import train as train_model
 
 
@@ -119,6 +122,20 @@ def cmd_backtest_rm(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_signal(args: argparse.Namespace) -> int:
+    """Generate a signal for the latest closed bar and notify via Telegram.
+
+    Returns:
+        Process exit code (always 0 on a successful run).
+    """
+    logger.info("Generating signal for {} {}m", SYMBOL, INTERVAL)
+    sig = generate_signal(SYMBOL, INTERVAL)
+    text = sig.format()
+    logger.info("Signal message:\n{}", text)
+    send_telegram(text, dry_run=args.dry_run)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -158,6 +175,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Risk-managed backtest v2 (SL/TP, sizing, tuned threshold).",
     )
     backtest_rm_parser.set_defaults(func=cmd_backtest_rm)
+
+    signal_parser = subparsers.add_parser(
+        "signal", help="Generate a signal for the latest closed bar (Telegram)."
+    )
+    signal_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the message instead of sending it to Telegram.",
+    )
+    signal_parser.set_defaults(func=cmd_signal)
 
     return parser
 

@@ -28,6 +28,10 @@ MODELS_DIR: Path = BASE_DIR / "models"
 BYBIT_API_KEY: str = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET: str = os.getenv("BYBIT_API_SECRET", "")
 
+# --- Telegram credentials (Phase 6) -----------------------------------------
+TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
 # --- Market parameters ------------------------------------------------------
 SYMBOL: str = "BTCUSDT"
 # Bybit kline interval in minutes as a string ("1", "5", "15", "60", ...).
@@ -109,3 +113,10 @@ MAX_LEVERAGE: float = 5.0
 # threshold is tuned on the validation segment (grid below) and then applied
 # out-of-sample on test.
 PROB_THRESHOLD_GRID: tuple[float, ...] = (0.34, 0.40, 0.45, 0.50, 0.55, 0.60)
+
+# --- Phase 6: live signal / Telegram ----------------------------------------
+# Confidence gate for live signals (matches the best valid-tuned threshold from
+# Phase 5). Below this the bot reports "no trade" rather than a direction.
+LIVE_PROB_THRESHOLD: float = 0.55
+# Days of recent history to pull so feature warm-up (EMA200 etc.) is covered.
+LIVE_LOOKBACK_DAYS: int = 5

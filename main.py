@@ -7,6 +7,7 @@ Usage:
     py main.py backtest [--segment {train,valid,test}]
     py main.py backtest-rm
     py main.py signal [--dry-run]
+    py main.py live [--once] [--notify-no-trade] [--dry-run]
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from crypto_signal_bot.data.storage import save_parquet
 from crypto_signal_bot.backtest.runner import run as run_backtest
 from crypto_signal_bot.backtest.runner import run_risk_managed
 from crypto_signal_bot.features.dataset import build_and_save
+from crypto_signal_bot.live.scheduler import run_live
 from crypto_signal_bot.live.signal import generate_signal
 from crypto_signal_bot.live.telegram import send_telegram
 from crypto_signal_bot.model.train import train as train_model
@@ -136,6 +138,23 @@ def cmd_signal(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_live(args: argparse.Namespace) -> int:
+    """Run the live signalling loop (or a single iteration with --once).
+
+    Returns:
+        Process exit code (always 0 on a clean run/stop).
+    """
+    logger.info("Starting live mode for {} {}m", SYMBOL, INTERVAL)
+    run_live(
+        SYMBOL,
+        INTERVAL,
+        notify_no_trade=args.notify_no_trade,
+        dry_run=args.dry_run,
+        once=args.once,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -185,6 +204,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the message instead of sending it to Telegram.",
     )
     signal_parser.set_defaults(func=cmd_signal)
+
+    live_parser = subparsers.add_parser(
+        "live", help="Run the live loop: emit a signal after each bar closes."
+    )
+    live_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single iteration and exit (e.g. for cron).",
+    )
+    live_parser.add_argument(
+        "--notify-no-trade",
+        action="store_true",
+        help="Also push 'no-trade' bars to Telegram (default: log only).",
+    )
+    live_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print messages instead of sending them to Telegram.",
+    )
+    live_parser.set_defaults(func=cmd_live)
 
     return parser
 

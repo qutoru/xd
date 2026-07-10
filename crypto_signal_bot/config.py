@@ -120,3 +120,11 @@ PROB_THRESHOLD_GRID: tuple[float, ...] = (0.34, 0.40, 0.45, 0.50, 0.55, 0.60)
 LIVE_PROB_THRESHOLD: float = 0.55
 # Days of recent history to pull so feature warm-up (EMA200 etc.) is covered.
 LIVE_LOOKBACK_DAYS: int = 5
+
+# --- Phase 7: live scheduler ------------------------------------------------
+# Wait this many seconds after a bar boundary before fetching, so the exchange
+# has published the just-closed candle.
+LIVE_BAR_BUFFER_SEC: int = 20
+# If False, "no-trade" bars are only logged, not pushed to Telegram (avoids
+# spamming a message every 15 minutes).
+LIVE_NOTIFY_NO_TRADE: bool = False

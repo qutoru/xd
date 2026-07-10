@@ -15,6 +15,7 @@ from crypto_signal_bot.config import (
     HISTORY_DAYS,
     INTERVAL,
     MIN_ROWS_FOR_TRAINING,
+    USE_DERIVATIVES,
 )
 from crypto_signal_bot.data.derivatives import merge_derivatives
 from crypto_signal_bot.data.fetcher import fetch_ohlcv
@@ -59,7 +60,8 @@ def fetch_all(
                 logger.warning("No candles for {} — skipping", symbol)
                 report.skipped.append(symbol)
                 continue
-            df = merge_derivatives(df, symbol, interval=interval, history_days=days)
+            if USE_DERIVATIVES:
+                df = merge_derivatives(df, symbol, interval=interval, history_days=days)
             save_parquet(df, symbol, interval)
             report.ok.append(symbol)
         except Exception as exc:  # keep the batch alive

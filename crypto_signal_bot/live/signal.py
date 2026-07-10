@@ -23,7 +23,9 @@ from crypto_signal_bot.config import (
     SL_ATR_MULT,
     SYMBOL,
     TP_ATR_MULT,
+    USE_DERIVATIVES,
 )
+from crypto_signal_bot.data.derivatives import merge_derivatives
 from crypto_signal_bot.data.fetcher import fetch_ohlcv
 from crypto_signal_bot.features.indicators import build_features
 from crypto_signal_bot.model.predict import SignalModel
@@ -112,6 +114,10 @@ def generate_signal(
         RuntimeError: If not enough history is available to compute features.
     """
     raw = fetch_ohlcv(symbol=symbol, interval=interval, history_days=LIVE_LOOKBACK_DAYS)
+    if USE_DERIVATIVES:
+        raw = merge_derivatives(
+            raw, symbol, interval=interval, history_days=LIVE_LOOKBACK_DAYS
+        )
     raw = raw.sort_values("timestamp").reset_index(drop=True)
     raw = _drop_forming_bar(raw, interval)
 

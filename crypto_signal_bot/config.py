@@ -45,6 +45,12 @@ HISTORY_DAYS: int = 180
 # The list is discovered from Bybit and cached to UNIVERSE_PATH.
 TOP_N_SYMBOLS: int = 50
 UNIVERSE_PATH: Path = DATA_DIR / "universe.json"
+
+# Enrich raw data with funding rate + open interest features. Implemented and
+# tested (see RESEARCH.md E3) but did NOT improve out-of-sample edge on 15m, so
+# it is OFF by default to keep the pipeline fast and consistent. Flip to True
+# (and re-run fetch/build/train) to trade with those features included.
+USE_DERIVATIVES: bool = False
 # Skip symbols whose processed dataset is smaller than this (too little history
 # to train a meaningful model, e.g. very recently listed pairs).
 MIN_ROWS_FOR_TRAINING: int = 3000

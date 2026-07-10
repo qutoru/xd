@@ -23,6 +23,7 @@ from loguru import logger
 
 from crypto_signal_bot.config import INTERVAL, SYMBOL
 from crypto_signal_bot.data.universe import get_universe, refresh_universe
+from crypto_signal_bot.backtest.portfolio import log_portfolio, run_portfolio_backtest
 from crypto_signal_bot.backtest.runner import run as run_backtest
 from crypto_signal_bot.backtest.runner import run_risk_managed
 from crypto_signal_bot.live.scheduler import run_live
@@ -113,6 +114,19 @@ def cmd_signal(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_portfolio(args: argparse.Namespace) -> int:
+    """Cross-sectional market-neutral portfolio backtest over the universe."""
+    logger.info("Portfolio backtest (top/bottom k={})", args.k)
+    stats = run_portfolio_backtest(k=args.k)
+    log_portfolio(stats)
+    logger.success(
+        "Portfolio done — gross_sharpe={:.2f} net_sharpe={:.2f}",
+        stats["gross_sharpe"],
+        stats["net_sharpe"],
+    )
+    return 0
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Run the live signalling loop over the universe (or a single symbol)."""
     symbols = [args.symbol] if args.symbol else None
@@ -184,6 +198,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_symbol_arg(backtest_rm_parser)
     backtest_rm_parser.set_defaults(func=cmd_backtest_rm)
+
+    portfolio_parser = subparsers.add_parser(
+        "portfolio",
+        help="Cross-sectional market-neutral top/bottom-k portfolio backtest.",
+    )
+    portfolio_parser.add_argument(
+        "--k",
+        type=int,
+        default=5,
+        help="Number of longs and of shorts per bar (default: 5).",
+    )
+    portfolio_parser.set_defaults(func=cmd_portfolio)
 
     signal_parser = subparsers.add_parser(
         "signal", help="One-shot signal(s) for the latest closed bar (Telegram)."

@@ -20,6 +20,7 @@ __pycache__/
 data/raw/
 data/processed/
 data/backtests/
+data/universe.json
 *.parquet
 
 # Trained models (generated artifacts)

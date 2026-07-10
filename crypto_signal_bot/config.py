@@ -33,11 +33,21 @@ TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # --- Market parameters ------------------------------------------------------
+# Default single symbol (used by diagnostics like backtest and as a fallback).
 SYMBOL: str = "BTCUSDT"
 # Bybit kline interval in minutes as a string ("1", "5", "15", "60", ...).
 INTERVAL: str = "15"
 # How many days of history to download.
 HISTORY_DAYS: int = 180
+
+# --- Multi-symbol universe --------------------------------------------------
+# The bot trades the top-N most liquid linear USDT perpetuals by 24h turnover.
+# The list is discovered from Bybit and cached to UNIVERSE_PATH.
+TOP_N_SYMBOLS: int = 50
+UNIVERSE_PATH: Path = DATA_DIR / "universe.json"
+# Skip symbols whose processed dataset is smaller than this (too little history
+# to train a meaningful model, e.g. very recently listed pairs).
+MIN_ROWS_FOR_TRAINING: int = 3000
 
 # --- Bybit API constants ----------------------------------------------------
 # "linear" = USDT-margined perpetual futures.

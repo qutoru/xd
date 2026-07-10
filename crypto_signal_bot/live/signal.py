@@ -100,8 +100,13 @@ def generate_signal(
     symbol: str = SYMBOL,
     interval: str = INTERVAL,
     threshold: float = LIVE_PROB_THRESHOLD,
+    model: SignalModel | None = None,
 ) -> Signal:
     """Produce a :class:`Signal` for the latest closed bar.
+
+    Args:
+        model: Optional pre-loaded model (avoids re-reading it from disk when
+            iterating many symbols in the live loop).
 
     Raises:
         RuntimeError: If not enough history is available to compute features.
@@ -117,7 +122,8 @@ def generate_signal(
             "Latest feature row has NaNs — increase LIVE_LOOKBACK_DAYS for warm-up"
         )
 
-    model = SignalModel.load(symbol, interval)
+    if model is None:
+        model = SignalModel.load(symbol, interval)
     signals, confs = model.predict_with_conf(last_feat)
     raw_direction = int(signals[0])
     confidence = float(confs[0])

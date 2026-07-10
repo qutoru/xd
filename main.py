@@ -5,6 +5,7 @@ Usage:
     py main.py build
     py main.py train
     py main.py backtest [--segment {train,valid,test}]
+    py main.py backtest-rm
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from crypto_signal_bot.config import HISTORY_DAYS, INTERVAL, SYMBOL
 from crypto_signal_bot.data.fetcher import fetch_ohlcv
 from crypto_signal_bot.data.storage import save_parquet
 from crypto_signal_bot.backtest.runner import run as run_backtest
+from crypto_signal_bot.backtest.runner import run_risk_managed
 from crypto_signal_bot.features.dataset import build_and_save
 from crypto_signal_bot.model.train import train as train_model
 
@@ -97,6 +99,26 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backtest_rm(_args: argparse.Namespace) -> int:
+    """Risk-managed backtest v2 (tune threshold on valid, evaluate on test).
+
+    Returns:
+        Process exit code (always 0 on a successful run).
+    """
+    logger.info("Risk-managed backtest for {} {}m", SYMBOL, INTERVAL)
+    stats = run_risk_managed(SYMBOL, INTERVAL)
+    logger.success(
+        "Backtest v2 done — thr={:.2f} total_return={:+.2%} sharpe={:.2f} "
+        "trades={} (buy&hold {:+.2%})",
+        stats["threshold"],
+        stats["total_return"],
+        stats["sharpe"],
+        stats["n_trades"],
+        stats["buy_hold_return"],
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -130,6 +152,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Which chronological split to evaluate (default: test).",
     )
     backtest_parser.set_defaults(func=cmd_backtest)
+
+    backtest_rm_parser = subparsers.add_parser(
+        "backtest-rm",
+        help="Risk-managed backtest v2 (SL/TP, sizing, tuned threshold).",
+    )
+    backtest_rm_parser.set_defaults(func=cmd_backtest_rm)
 
     return parser
 

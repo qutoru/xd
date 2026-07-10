@@ -45,3 +45,12 @@ class SignalModel:
         """Return the predicted ``-1/0/1`` signal for each row."""
         proba = self.predict_proba(df)
         return self.class_order[proba.argmax(axis=1)]
+
+    def predict_with_conf(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        """Return ``(signals, confidence)`` where confidence is the top proba.
+
+        Used by the risk-managed backtest to gate entries on model confidence.
+        """
+        proba = self.predict_proba(df)
+        idx = proba.argmax(axis=1)
+        return self.class_order[idx], proba[np.arange(len(idx)), idx]

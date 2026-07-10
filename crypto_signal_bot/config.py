@@ -95,3 +95,17 @@ EARLY_STOPPING_ROUNDS: int = 100
 FEE_RATE: float = 0.00055
 # 15m bars in a year: 4 * 24 * 365. Used to annualize return/Sharpe.
 BARS_PER_YEAR: int = 4 * 24 * 365
+
+# --- Phase 5: risk management + backtest v2 ---------------------------------
+# One position at a time; exit on stop-loss / take-profit / time barrier.
+# SL/TP are sized in ATR units (same volatility scale as the labels).
+SL_ATR_MULT: float = 1.5
+TP_ATR_MULT: float = 1.5
+# Risk-based position sizing: risk this fraction of equity per trade, given the
+# ATR stop distance. Notional is capped at MAX_LEVERAGE x equity.
+RISK_PER_TRADE: float = 0.01
+MAX_LEVERAGE: float = 5.0
+# Only enter when the model's top-class probability clears a threshold. The
+# threshold is tuned on the validation segment (grid below) and then applied
+# out-of-sample on test.
+PROB_THRESHOLD_GRID: tuple[float, ...] = (0.34, 0.40, 0.45, 0.50, 0.55, 0.60)

@@ -76,3 +76,82 @@ def log_performance(name: str, stats: dict) -> None:
         stats["total_fees"],
     )
     logger.info("  benchmark buy&hold={:+.2%}", stats["buy_hold_return"])
+
+
+def event_performance(
+    bars: pd.DataFrame,
+    trades: pd.DataFrame,
+    *,
+    bars_per_year: int = BARS_PER_YEAR,
+) -> dict:
+    """Performance stats for the risk-managed (event-driven) backtest.
+
+    Combines equity-curve stats (return/Sharpe/drawdown/exposure) with
+    per-trade stats (count, win-rate, average trade return).
+
+    Returns:
+        A stats dict; ``n_trades`` etc. reflect actual round-trip trades.
+    """
+    net = bars["net"]
+    n = len(bars)
+    equity_final = float(bars["equity"].iloc[-1]) if n else 1.0
+    total_return = equity_final - 1.0
+
+    if n > 0 and net.std(ddof=0) > 0:
+        sharpe = float(net.mean() / net.std(ddof=0) * np.sqrt(bars_per_year))
+    else:
+        sharpe = 0.0
+    ann_return = (equity_final ** (bars_per_year / n) - 1.0) if n > 0 else 0.0
+
+    n_trades = int(len(trades))
+    if n_trades:
+        wins = int((trades["net_return"] > 0).sum())
+        win_rate = wins / n_trades
+        avg_trade = float(trades["net_return"].mean())
+        reason_counts = trades["reason"].value_counts().to_dict()
+    else:
+        win_rate = 0.0
+        avg_trade = 0.0
+        reason_counts = {}
+
+    buy_hold = float(bars["close"].iloc[-1] / bars["close"].iloc[0] - 1.0) if n else 0.0
+
+    return {
+        "bars": n,
+        "total_return": total_return,
+        "ann_return": ann_return,
+        "sharpe": sharpe,
+        "max_drawdown": _max_drawdown(bars["equity"]) if n else 0.0,
+        "exposure": float((bars["position"] != 0).mean()) if n else 0.0,
+        "n_trades": n_trades,
+        "win_rate": win_rate,
+        "avg_trade_return": avg_trade,
+        "total_fees": float(bars["cost"].sum()),
+        "exit_reasons": reason_counts,
+        "buy_hold_return": buy_hold,
+    }
+
+
+def log_event_performance(name: str, stats: dict) -> None:
+    """Pretty-log an :func:`event_performance` dict."""
+    logger.info("[{}] risk-managed backtest over {} bars", name, stats["bars"])
+    logger.info(
+        "  total_return={:+.2%}  ann_return={:+.2%}  sharpe={:.2f}  max_dd={:.2%}",
+        stats["total_return"],
+        stats["ann_return"],
+        stats["sharpe"],
+        stats["max_drawdown"],
+    )
+    logger.info(
+        "  trades={}  win_rate={:.1%}  avg_trade={:+.3%}  exposure={:.1%}  fees={:.2%}",
+        stats["n_trades"],
+        stats["win_rate"],
+        stats["avg_trade_return"],
+        stats["exposure"],
+        stats["total_fees"],
+    )
+    logger.info(
+        "  exits={}  benchmark buy&hold={:+.2%}",
+        stats["exit_reasons"],
+        stats["buy_hold_return"],
+    )

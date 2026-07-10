@@ -19,6 +19,7 @@ __pycache__/
 # Fetched / generated datasets
 data/raw/
 data/processed/
+data/backtests/
 *.parquet
 
 # Trained models (generated artifacts)

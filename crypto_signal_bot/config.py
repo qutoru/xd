@@ -21,6 +21,7 @@ BASE_DIR: Path = Path(__file__).resolve().parent.parent
 DATA_DIR: Path = BASE_DIR / "data"
 RAW_DIR: Path = DATA_DIR / "raw"
 PROCESSED_DIR: Path = DATA_DIR / "processed"
+BACKTEST_DIR: Path = DATA_DIR / "backtests"
 MODELS_DIR: Path = BASE_DIR / "models"
 
 # --- Bybit credentials (optional for public market data) --------------------
@@ -87,3 +88,10 @@ LGBM_PARAMS: dict = {
     "verbose": -1,
 }
 EARLY_STOPPING_ROUNDS: int = 100
+
+# --- Phase 4: backtest parameters -------------------------------------------
+# Bybit linear-perp taker fee (0.055%). The per-bar signal flips often, so we
+# assume taker fills. Charged on each unit of position change (turnover).
+FEE_RATE: float = 0.00055
+# 15m bars in a year: 4 * 24 * 365. Used to annualize return/Sharpe.
+BARS_PER_YEAR: int = 4 * 24 * 365

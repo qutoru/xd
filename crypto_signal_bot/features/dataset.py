@@ -9,7 +9,13 @@ from __future__ import annotations
 import pandas as pd
 from loguru import logger
 
-from crypto_signal_bot.config import INTERVAL, SYMBOL
+from crypto_signal_bot.config import (
+    HORIZON,
+    INTERVAL,
+    LABEL_SL_MULT,
+    LABEL_TP_MULT,
+    SYMBOL,
+)
 from crypto_signal_bot.data.storage import load_parquet, save_processed
 from crypto_signal_bot.features.indicators import build_features, compute_atr
 from crypto_signal_bot.features.labeling import triple_barrier_labels
@@ -45,7 +51,13 @@ def build_dataset(
     # Compute ATR once and share it between features and labeling.
     atr = compute_atr(df_raw)
     features = build_features(df_raw)
-    labels = triple_barrier_labels(df_raw, atr=atr)
+    labels = triple_barrier_labels(
+        df_raw,
+        horizon=HORIZON,
+        tp_mult=LABEL_TP_MULT,
+        sl_mult=LABEL_SL_MULT,
+        atr=atr,
+    )
 
     meta = df_raw[[c for c in _META_COLUMNS if c in df_raw.columns]]
     dataset = pd.concat([meta, features], axis=1)

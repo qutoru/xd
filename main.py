@@ -5,11 +5,12 @@ Multi-symbol: fetch/build/train/signal/live operate over the whole universe
 
 Usage:
     py main.py symbols                 # discover & cache the top-N universe
-    py main.py fetch   [--symbol S]
-    py main.py build   [--symbol S]
-    py main.py train   [--symbol S]
-    py main.py backtest    [--symbol S] [--segment {train,valid,test}]
-    py main.py backtest-rm [--symbol S]
+    py main.py fetch   [--symbol S] [--interval M] [--days N]
+    py main.py build   [--symbol S] [--interval M]
+    py main.py train   [--symbol S] [--interval M]
+    py main.py backtest    [--symbol S] [--interval M] [--segment {train,valid,test}]
+    py main.py backtest-rm [--symbol S] [--interval M]
+    py main.py walkforward [--symbol S] [--interval M] [--splits K]
     py main.py signal  [--symbol S] [--dry-run]
     py main.py live    [--symbol S] [--once] [--notify-no-trade] [--dry-run]
 """
@@ -21,11 +22,12 @@ import sys
 
 from loguru import logger
 
-from crypto_signal_bot.config import INTERVAL, SYMBOL
+from crypto_signal_bot.config import HISTORY_DAYS, INTERVAL, SYMBOL
 from crypto_signal_bot.data.universe import get_universe, refresh_universe
 from crypto_signal_bot.backtest.portfolio import log_portfolio, run_portfolio_backtest
 from crypto_signal_bot.backtest.runner import run as run_backtest
 from crypto_signal_bot.backtest.runner import run_risk_managed
+from crypto_signal_bot.backtest.walkforward import log_walkforward, run_walkforward
 from crypto_signal_bot.live.scheduler import run_live
 from crypto_signal_bot.live.signal import generate_signal
 from crypto_signal_bot.live.telegram import send_telegram
@@ -52,27 +54,27 @@ def cmd_symbols(_args: argparse.Namespace) -> int:
 
 def cmd_fetch(args: argparse.Namespace) -> int:
     """Download OHLCV history for the resolved symbol(s)."""
-    fetch_all(_resolve_symbols(args), interval=INTERVAL)
+    fetch_all(_resolve_symbols(args), interval=args.interval, days=args.days)
     return 0
 
 
 def cmd_build(args: argparse.Namespace) -> int:
     """Build features+labels datasets for the resolved symbol(s)."""
-    build_all(_resolve_symbols(args), interval=INTERVAL)
+    build_all(_resolve_symbols(args), interval=args.interval)
     return 0
 
 
 def cmd_train(args: argparse.Namespace) -> int:
     """Train a model per resolved symbol."""
-    train_all(_resolve_symbols(args), interval=INTERVAL)
+    train_all(_resolve_symbols(args), interval=args.interval)
     return 0
 
 
 def cmd_backtest(args: argparse.Namespace) -> int:
     """Backtest one symbol on a held-out split (no risk management)."""
     symbol = args.symbol or SYMBOL
-    logger.info("Backtesting {} {}m on '{}' segment", symbol, INTERVAL, args.segment)
-    stats = run_backtest(symbol, INTERVAL, segment=args.segment)
+    logger.info("Backtesting {} {}m on '{}' segment", symbol, args.interval, args.segment)
+    stats = run_backtest(symbol, args.interval, segment=args.segment)
     logger.success(
         "Backtest done — total_return={:+.2%} sharpe={:.2f} (buy&hold {:+.2%})",
         stats["total_return"],
@@ -85,8 +87,8 @@ def cmd_backtest(args: argparse.Namespace) -> int:
 def cmd_backtest_rm(args: argparse.Namespace) -> int:
     """Risk-managed backtest v2 for one symbol (tune on valid, eval on test)."""
     symbol = args.symbol or SYMBOL
-    logger.info("Risk-managed backtest for {} {}m", symbol, INTERVAL)
-    stats = run_risk_managed(symbol, INTERVAL)
+    logger.info("Risk-managed backtest for {} {}m", symbol, args.interval)
+    stats = run_risk_managed(symbol, args.interval)
     logger.success(
         "Backtest v2 done — thr={:.2f} total_return={:+.2%} sharpe={:.2f} "
         "trades={} (buy&hold {:+.2%})",
@@ -111,6 +113,20 @@ def cmd_signal(args: argparse.Namespace) -> int:
                 send_telegram(sig.format(), dry_run=args.dry_run)
         except Exception as exc:  # isolate a bad symbol
             logger.exception("{}: signal failed, continuing: {}", symbol, exc)
+    return 0
+
+
+def cmd_walkforward(args: argparse.Namespace) -> int:
+    """Purged walk-forward CV of the risk-managed strategy for one symbol."""
+    symbol = args.symbol or SYMBOL
+    logger.info("Walk-forward CV for {} {}m ({} splits)", symbol, args.interval, args.splits)
+    summary = run_walkforward(symbol, args.interval, n_splits=args.splits)
+    log_walkforward(summary)
+    logger.success(
+        "Walk-forward done — mean_sharpe={:.2f} positive_folds={:.0%}",
+        summary["mean_sharpe"],
+        summary["frac_positive"],
+    )
     return 0
 
 
@@ -149,6 +165,15 @@ def _add_symbol_arg(sub: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_interval_arg(sub: argparse.ArgumentParser) -> None:
+    """Attach the shared optional --interval override (kline minutes)."""
+    sub.add_argument(
+        "--interval",
+        default=INTERVAL,
+        help=f"Kline interval in minutes (default: {INTERVAL}). E.g. 60 for 1h.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -166,24 +191,34 @@ def build_parser() -> argparse.ArgumentParser:
         "fetch", help="Download OHLCV history from Bybit and save to parquet."
     )
     _add_symbol_arg(fetch_parser)
+    _add_interval_arg(fetch_parser)
+    fetch_parser.add_argument(
+        "--days",
+        type=int,
+        default=HISTORY_DAYS,
+        help=f"How many days of history to fetch (default: {HISTORY_DAYS}).",
+    )
     fetch_parser.set_defaults(func=cmd_fetch)
 
     build_parser_ = subparsers.add_parser(
         "build", help="Build features + triple-barrier labels from raw OHLCV."
     )
     _add_symbol_arg(build_parser_)
+    _add_interval_arg(build_parser_)
     build_parser_.set_defaults(func=cmd_build)
 
     train_parser = subparsers.add_parser(
         "train", help="Train the LightGBM signal model per symbol."
     )
     _add_symbol_arg(train_parser)
+    _add_interval_arg(train_parser)
     train_parser.set_defaults(func=cmd_train)
 
     backtest_parser = subparsers.add_parser(
         "backtest", help="Backtest one symbol (no risk management)."
     )
     _add_symbol_arg(backtest_parser)
+    _add_interval_arg(backtest_parser)
     backtest_parser.add_argument(
         "--segment",
         choices=("train", "valid", "test"),
@@ -197,7 +232,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Risk-managed backtest v2 for one symbol (SL/TP, sizing, threshold).",
     )
     _add_symbol_arg(backtest_rm_parser)
+    _add_interval_arg(backtest_rm_parser)
     backtest_rm_parser.set_defaults(func=cmd_backtest_rm)
+
+    walkforward_parser = subparsers.add_parser(
+        "walkforward",
+        help="Purged walk-forward CV of the risk-managed strategy (one symbol).",
+    )
+    _add_symbol_arg(walkforward_parser)
+    _add_interval_arg(walkforward_parser)
+    walkforward_parser.add_argument(
+        "--splits",
+        type=int,
+        default=6,
+        help="Number of walk-forward test folds (default: 6).",
+    )
+    walkforward_parser.set_defaults(func=cmd_walkforward)
 
     portfolio_parser = subparsers.add_parser(
         "portfolio",

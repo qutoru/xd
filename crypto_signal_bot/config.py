@@ -62,13 +62,23 @@ CATEGORY: str = "linear"
 MAX_LIMIT: int = 1000
 
 # --- Phase 2: labeling parameters -------------------------------------------
-# Triple-barrier labeling (Lopez de Prado). For each bar we place symmetric
-# horizontal barriers at close +/- ATR_MULT * ATR and a vertical (time) barrier
-# HORIZON bars ahead. The class is decided by whichever barrier is touched
-# first (up -> long=1, down -> short=-1, time/none -> flat=0).
+# Triple-barrier labeling (Lopez de Prado). For each bar and each side we place
+# a take-profit barrier at LABEL_TP_MULT * ATR and a stop barrier at
+# LABEL_SL_MULT * ATR, plus a vertical (time) barrier HORIZON bars ahead:
+#   long  = TP (+TP*ATR) touched before SL (-SL*ATR),
+#   short = TP (-TP*ATR) touched before SL (+SL*ATR),
+#   flat  = neither side resolves in its favour within HORIZON.
+# The default is SYMMETRIC (TP == SL): long = up first, short = down first.
+# The asymmetric cost-aware variant (TP=2, SL=1, HORIZON=16, on 1h) was tested
+# in RESEARCH.md E4 and did NOT produce OOS edge (win-rate 31% < the 33.3%
+# break-even for 2:1 R:R), so we keep the validated symmetric 15m regime. The
+# machinery stays parametrised: set LABEL_TP_MULT != LABEL_SL_MULT (and re-run
+# fetch/build/train, optionally with `--interval 60`) to reproduce E4.
 HORIZON: int = 8  # prediction horizon in bars (8 * 15m = 2h)
 ATR_PERIOD: int = 14  # ATR lookback used to size the barriers
-ATR_MULT: float = 1.5  # barrier distance as a multiple of ATR
+LABEL_TP_MULT: float = 1.5  # take-profit barrier distance as a multiple of ATR
+LABEL_SL_MULT: float = 1.5  # stop barrier distance as a multiple of ATR
+ATR_MULT: float = 1.5  # legacy alias for the symmetric barrier width
 
 # Integer label encoding used across training/inference.
 LABEL_SHORT: int = -1
@@ -118,9 +128,10 @@ BARS_PER_YEAR: int = 4 * 24 * 365
 
 # --- Phase 5: risk management + backtest v2 ---------------------------------
 # One position at a time; exit on stop-loss / take-profit / time barrier.
-# SL/TP are sized in ATR units (same volatility scale as the labels).
-SL_ATR_MULT: float = 1.5
-TP_ATR_MULT: float = 1.5
+# SL/TP are sized in ATR units and kept equal to the LABEL_*_MULT barriers so a
+# trade is exited on exactly the R:R the model was trained to predict (E4: 2:1).
+SL_ATR_MULT: float = LABEL_SL_MULT
+TP_ATR_MULT: float = LABEL_TP_MULT
 # Risk-based position sizing: risk this fraction of equity per trade, given the
 # ATR stop distance. Notional is capped at MAX_LEVERAGE x equity.
 RISK_PER_TRADE: float = 0.01

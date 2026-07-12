@@ -26,7 +26,11 @@ from loguru import logger
 from crypto_signal_bot.data.storage import load_parquet
 from crypto_signal_bot.research.xsection import features as ft
 from crypto_signal_bot.research.xsection import portfolio as pf
-from crypto_signal_bot.research.xsection.universe import SURVIVORSHIP_SAFE, build_returns_panel
+from crypto_signal_bot.research.xsection.universe import (
+    SURVIVORSHIP_SAFE,
+    build_returns_panel,
+    to_daily,
+)
 
 OUT = Path("data/research/e7")
 
@@ -41,8 +45,10 @@ REVERSAL_LOOKBACK = 3  # fixed, from Stage B — NOT tuned
 REP = dict(hold=4, rebalance=1, k_pct=0.20, exec_lag=1)
 
 
-def _load(interval: str):
-    panel = build_returns_panel(SURVIVORSHIP_SAFE, interval)
+def _load(interval: str, daily: bool = False):
+    panel = build_returns_panel(SURVIVORSHIP_SAFE, "60" if daily else interval)
+    if daily:
+        panel = to_daily(panel)
     simple = panel.pct_change().dropna(how="all")
     logret = np.log(panel / panel.shift(1)).dropna(how="all")
     feat = ft.short_term_reversal(logret, lookback=REVERSAL_LOOKBACK)
@@ -93,12 +99,16 @@ def deep_dive(simple, feat, interval_min, cost, index):
     return pd.DataFrame(wf), pd.DataFrame(yby), pd.DataFrame(reg)
 
 
-def liquidity_subset(panel, interval, interval_min, cost):
-    """Q6: re-run the rep config on the top-liquidity half of the universe."""
+def liquidity_subset(panel, data_interval, interval_min, cost):
+    """Q6: re-run the rep config on the top-liquidity half of the universe.
+
+    Liquidity is always ranked from the 1h raw files; ``panel`` is at the target
+    frequency (daily or hourly), so the sub-portfolio inherits that frequency.
+    """
     vols = {}
     for sym in panel.columns:
-        raw = load_parquet(sym, interval)
-        vols[sym] = float(np.median(raw["turnover"].to_numpy()))  # quote (USDT) volume
+        raw = load_parquet(sym, data_interval)
+        vols[sym] = float(np.median(raw["turnover"].to_numpy()))  # quote (USDT) volume / 1h bar
     med = pd.Series(vols).sort_values()
     top_half = list(med.index[len(med) // 2:])
     sub = panel[top_half]
@@ -108,24 +118,34 @@ def liquidity_subset(panel, interval, interval_min, cost):
     return pf.portfolio_metrics(res, interval_min), len(top_half), med
 
 
-def capacity_estimate(panel, interval, rep_metrics, med_vol: pd.Series) -> float:
+def capacity_estimate(univ_dollar_per_bar: float, turnover_annual: float, interval_min: int) -> float:
     """Q7: coarse AUM capacity at 1% participation of universe dollar volume."""
-    univ_dollar_per_bar = float(med_vol.sum())  # median USDT volume/bar summed
-    turnover_per_bar = rep_metrics["turnover_annual"] / (365 * 24 * 60 / int(interval))
+    from crypto_signal_bot.research.metrics import bars_per_year
+    turnover_per_bar = turnover_annual / bars_per_year(interval_min)
     if turnover_per_bar <= 0:
         return float("inf")
     return 0.01 * univ_dollar_per_bar / turnover_per_bar
 
 
 def main() -> None:
+    global OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=int, default=60)
+    ap.add_argument("--daily", action="store_true",
+                    help="Resample to daily bars (E8, low-frequency); grid H/R in days.")
     args = ap.parse_args()
-    interval, interval_min = str(args.interval), args.interval
+    data_interval = "60"
+    if args.daily:
+        interval_min = 24 * 60
+        OUT = Path("data/research/e8")
+    else:
+        interval_min = args.interval
+        data_interval = str(args.interval)
     OUT.mkdir(parents=True, exist_ok=True)
 
-    panel, simple, feat = _load(interval)
-    logger.info("Panel {} symbols x {} bars", panel.shape[1], panel.shape[0])
+    panel, simple, feat = _load(str(args.interval), daily=args.daily)
+    unit = "days" if args.daily else "bars"
+    logger.info("Panel {} symbols x {} {} (grid H/R in {})", panel.shape[1], panel.shape[0], unit, unit)
 
     grid = run_grid(simple, feat, interval_min)
     grid.to_csv(OUT / "stagec_grid.csv", index=False)
@@ -168,12 +188,14 @@ def main() -> None:
                 {r.regime: round(r.net_sharpe, 2) for _, r in reg.iterrows()})
 
     # Q6 liquidity subset + Q7 capacity.
-    liq_m, n_liq, med_vol = liquidity_subset(panel, interval, interval_min, COSTS["med"])
+    liq_m, n_liq, med_vol = liquidity_subset(panel, data_interval, interval_min, COSTS["med"])
     logger.info("Liquidity subset (top {} names) net Sharpe @med: {:+.2f}", n_liq, liq_m["net_sharpe"])
-    # Capacity from the representative config's turnover.
+    # Capacity from the representative config's turnover. Universe dollar volume
+    # is per 1h bar; scale to per-day when in daily mode.
     rep_res = pf.backtest_portfolio(simple, feat, cost=COSTS["med"], **REP)
     rep_m = pf.portfolio_metrics(rep_res, interval_min)
-    cap = capacity_estimate(panel, interval, rep_m, med_vol)
+    univ_dollar = float(med_vol.sum()) * (24 if args.daily else 1)
+    cap = capacity_estimate(univ_dollar, rep_m["turnover_annual"], interval_min)
     logger.info("Capacity estimate (rep config, 1% participation): ~${:,.0f}", cap)
 
     wf.to_csv(OUT / "stagec_walkforward.csv", index=False)
@@ -194,12 +216,20 @@ def main() -> None:
     ax.legend(); fig.tight_layout(); fig.savefig(OUT / "stagec_holding_cost.png", dpi=110); plt.close(fig)
 
     logger.info("=" * 60)
-    if n_pos_med == 0:
-        logger.info("E7 STAGE C VERDICT: net Sharpe <= 0 for ALL configs at realistic cost "
-                    "-> alpha does NOT survive execution. STOP.")
+    tag = "E8 (daily)" if args.daily else "E7 (1h)"
+    if args.daily:
+        # Pre-registered E8 pass: >=1 config net Sharpe>=1.0 @ Med AND WF net>0 in >=4/6.
+        wf_pos = int((wf["net_sharpe"] > 0).sum())
+        passed = best_med_net >= 1.0 and wf_pos >= 4
+        logger.info("{} PRE-COMMITTED PASS = (best net Sharpe>=1.0 @Med AND WF>0 in>=4/6). "
+                    "best_net={:+.2f}, WF>0 folds={}/6 -> {}", tag, best_med_net, wf_pos,
+                    "PASS" if passed else "FAIL -> hypothesis falsified, STOP")
+    elif n_pos_med == 0:
+        logger.info("{} STAGE C VERDICT: net Sharpe <= 0 for ALL configs at realistic cost "
+                    "-> alpha does NOT survive execution. STOP.", tag)
     else:
-        logger.info("E7 STAGE C: {} configs survive net>0 @ realistic cost (best {:+.2f}) "
-                    "-> characterize before any advanced construction.", n_pos_med, best_med_net)
+        logger.info("{} STAGE C: {} configs survive net>0 @ realistic cost (best {:+.2f}).",
+                    tag, n_pos_med, best_med_net)
     logger.info("Artifacts in {}", OUT)
 
 

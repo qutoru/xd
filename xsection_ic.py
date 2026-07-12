@@ -23,7 +23,11 @@ from loguru import logger
 from crypto_signal_bot.config import FEE_RATE
 from crypto_signal_bot.research.xsection import features as ft
 from crypto_signal_bot.research.xsection import ic as ic_mod
-from crypto_signal_bot.research.xsection.universe import SURVIVORSHIP_SAFE, build_returns_panel
+from crypto_signal_bot.research.xsection.universe import (
+    SURVIVORSHIP_SAFE,
+    build_returns_panel,
+    to_daily,
+)
 
 OUT = Path("data/research/e7")
 
@@ -119,14 +123,22 @@ def _plots(results: list[dict]) -> None:
 
 
 def main() -> None:
+    global OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=int, default=60)
+    ap.add_argument("--daily", action="store_true",
+                    help="Resample the 1h panel to daily bars (E8, low-frequency).")
     args = ap.parse_args()
-    interval = str(args.interval)
-    bars_per_year = 365 * 24 * 60 / args.interval
-    OUT.mkdir(parents=True, exist_ok=True)
 
-    panel = build_returns_panel(SURVIVORSHIP_SAFE, interval)
+    if args.daily:
+        interval_min = 24 * 60
+        OUT = Path("data/research/e8")
+        panel = to_daily(build_returns_panel(SURVIVORSHIP_SAFE, "60"))
+    else:
+        interval_min = args.interval
+        panel = build_returns_panel(SURVIVORSHIP_SAFE, str(args.interval))
+    bars_per_year = 365 * 24 * 60 / interval_min
+    OUT.mkdir(parents=True, exist_ok=True)
     returns = ft.log_returns(panel).dropna(how="all")
     resid = ft.residualize(returns).dropna(how="all")
 
@@ -148,7 +160,9 @@ def main() -> None:
         "short_term_reversal": ft.short_term_reversal(returns),
     }
     fpath = Path("data/research/e7/funding_panel.parquet")
-    if fpath.exists():
+    if args.daily:
+        logger.info("Daily mode: testing only the classic factors (momentum/reversal)")
+    elif fpath.exists():
         funding = pd.read_parquet(fpath)
         feats["funding_dispersion"] = ft.funding_dispersion(funding.reindex_like(returns))
     else:

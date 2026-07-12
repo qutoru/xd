@@ -88,3 +88,13 @@ def test_portfolio_weights_dollar_neutral_gross_one():
     assert abs(w.sum()) < 1e-12          # dollar neutral
     assert abs(np.abs(w).sum() - 1.0) < 1e-12  # gross exposure = 1
     assert (w[:3] > 0).all() and (w[-3:] < 0).all()  # long high feature, short low
+
+
+def test_to_daily_resamples_last_close():
+    from crypto_signal_bot.research.xsection.universe import to_daily
+    idx = pd.date_range("2023-01-01", periods=48, freq="h", tz="UTC")  # 2 UTC days
+    panel = pd.DataFrame({"A": np.arange(48.0)}, index=idx)
+    d = to_daily(panel)
+    assert len(d) == 2                       # two daily bars
+    assert d["A"].iloc[0] == 23.0            # last hourly close of day 1
+    assert d["A"].iloc[1] == 47.0            # last hourly close of day 2

@@ -31,6 +31,15 @@ SURVIVORSHIP_SAFE = [
 ]
 
 
+def to_daily(panel: pd.DataFrame) -> pd.DataFrame:
+    """Resample an intraday close-price panel to daily (last close per UTC day).
+
+    Only the horizon changes: the same close series is aggregated to daily bars
+    so the identical feature/IC/portfolio harness runs at a lower frequency.
+    """
+    return panel.resample("1D").last().dropna(how="all")
+
+
 def build_returns_panel(
     symbols: list[str],
     interval: str,

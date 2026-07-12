@@ -1,0 +1,22 @@
+{
+  "base_sharpe": 1.7065615957579299,
+  "first_fail": "T2",
+  "results": {
+    "T1": {
+      "survived": true,
+      "sharpe_pit": 1.7065615957579299,
+      "sharpe_reused": 1.7065615957579299,
+      "no_funding_leak": true,
+      "panel_corr": 0.9999999999999999,
+      "n_symbols": 39,
+      "off_grid_settlement_frac": 0.008075284542506517
+    },
+    "T2": {
+      "survived": false,
+      "sharpe_drop_top5pct": -1.1599412011221484,
+      "sharpe_ex_crisis_decile": 1.6490146418290705,
+      "top1_day_pnl_share": 0.07109365907798809,
+      "top5pct_pnl_share": 1.5022403083121139
+    }
+  }
+}

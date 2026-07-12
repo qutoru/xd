@@ -78,6 +78,26 @@ decisive kill-test) → Stage C survival under realistic cost (net Sharpe > 1,
 ≥ 4/6 walk-forward folds positive, capacity). Failing an earlier stage stops the
 experiment; do not proceed or add features.
 
+## Designing robustness / adversarial tests (lesson from ALX2)
+
+When pre-registering robustness or concentration tests, **prefer symmetric or
+distributional stresses over ones that remove only positive extremes.**
+
+- Removing only the best *k*% of days (as ALX2's T2 did) is an **asymmetric**
+  stress: it deletes right-tail winners while keeping every loser. Genuine
+  financial strategies naturally concentrate returns in relatively few
+  observations, so this stress is over-aggressive — a real daily strategy whose
+  annualized Sharpe is not very high can fail it even when it is sound.
+- Prefer instead: **symmetric trimming** (both tails), **contribution analysis**
+  (report the PnL share of top days as a diagnostic, not a hard gate), or
+  **CVaR / tail-based** robustness. Gate on symmetric or economically motivated
+  criteria, not on the removal of winners alone.
+
+This lesson is **forward-looking only**. It does **not** change the ALX2 verdict
+(FAIL at T2 stands: the criterion was locked before the run, correctly computed,
+and the protocol forbids retroactive reinterpretation). Apply it to the design of
+*future* pre-registrations, never to relitigate a locked one.
+
 ## Environment & conventions
 
 - **Python:** use `py`, **not** `python` (PATH `python` is a broken MS Store

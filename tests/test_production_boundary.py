@@ -28,6 +28,7 @@ PRODUCTION_PATHS = [
     PKG / "live",
     PKG / "pipeline.py",
     PKG / "platform",
+    PKG / "app",
     REPO / "main.py",
 ]
 

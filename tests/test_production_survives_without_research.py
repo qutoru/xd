@@ -68,6 +68,8 @@ PRODUCTION_MODULES = [
     "crypto_signal_bot.platform.execution.broker",
     "crypto_signal_bot.platform.execution.engine",
     "crypto_signal_bot.platform.execution.fake_broker",
+    "crypto_signal_bot.platform.pipeline",
+    "crypto_signal_bot.app.cli",
     "main",
 ]
 

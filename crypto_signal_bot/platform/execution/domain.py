@@ -1,0 +1,128 @@
+"""Execution domain model — pure, broker-agnostic value types.
+
+No knowledge of exchanges, signals, alphas or portfolio construction. Quantities
+are expressed as notional (weight * NAV); prices are optional so the model works
+in the abstraction-only Stage 5 without any market data.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+
+import pandas as pd
+
+
+class Side(str, Enum):
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderType(str, Enum):
+    MARKET = "market"
+    LIMIT = "limit"
+
+
+class OrderStatus(str, Enum):
+    PENDING = "pending"
+    FILLED = "filled"
+    PARTIALLY_FILLED = "partially_filled"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True)
+class OrderRequest:
+    """An abstract instruction to trade ``quantity`` (>0) notional of a symbol."""
+
+    symbol: str
+    side: Side
+    quantity: float  # absolute notional to trade
+    order_type: OrderType = OrderType.MARKET
+    target_weight: float | None = None  # metadata only
+    client_id: str | None = None
+
+
+@dataclass(frozen=True)
+class Fill:
+    """A (partial) execution of an order."""
+
+    symbol: str
+    side: Side
+    quantity: float
+    price: float | None = None
+    fee: float = 0.0
+    timestamp: pd.Timestamp | None = None
+
+
+@dataclass(frozen=True)
+class OrderResult:
+    """A broker's response to one :class:`OrderRequest`."""
+
+    request: OrderRequest
+    status: OrderStatus
+    filled_quantity: float = 0.0
+    avg_price: float | None = None
+    fills: list[Fill] = field(default_factory=list)
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class Order:
+    """A tracked order: the request plus its terminal status/result."""
+
+    id: str
+    request: OrderRequest
+    status: OrderStatus
+    result: OrderResult | None = None
+
+
+@dataclass(frozen=True)
+class Position:
+    """A held position, as signed notional (long > 0, short < 0)."""
+
+    symbol: str
+    quantity: float
+    avg_price: float | None = None
+
+
+@dataclass(frozen=True)
+class PortfolioState:
+    """Current holdings and NAV. Broker-owned; alpha/portfolio-agnostic."""
+
+    value: float = 0.0
+    positions: dict[str, Position] = field(default_factory=dict)
+
+    def notional(self, symbol: str) -> float:
+        pos = self.positions.get(symbol)
+        return pos.quantity if pos is not None else 0.0
+
+    def weights(self) -> pd.Series:
+        """Per-symbol weights = position notional / NAV (empty if NAV == 0)."""
+        if self.value == 0:
+            return pd.Series(dtype="float64")
+        return pd.Series(
+            {s: p.quantity / self.value for s, p in self.positions.items()},
+            dtype="float64",
+        )
+
+
+@dataclass(frozen=True)
+class ExecutionReport:
+    """Outcome of translating one TargetBook into routed orders."""
+
+    asof: pd.Timestamp
+    orders: list[Order]
+    resulting_state: PortfolioState
+
+    @property
+    def n_filled(self) -> int:
+        return sum(o.status == OrderStatus.FILLED for o in self.orders)
+
+    @property
+    def n_rejected(self) -> int:
+        return sum(o.status == OrderStatus.REJECTED for o in self.orders)
+
+    @property
+    def traded_notional(self) -> float:
+        return float(sum(o.request.quantity for o in self.orders))

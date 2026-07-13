@@ -64,6 +64,10 @@ PRODUCTION_MODULES = [
     "crypto_signal_bot.platform.shadow.costs",
     "crypto_signal_bot.platform.shadow.replay",
     "crypto_signal_bot.platform.shadow.runner",
+    "crypto_signal_bot.platform.execution.domain",
+    "crypto_signal_bot.platform.execution.broker",
+    "crypto_signal_bot.platform.execution.engine",
+    "crypto_signal_bot.platform.execution.fake_broker",
     "main",
 ]
 

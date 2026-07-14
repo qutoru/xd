@@ -124,7 +124,8 @@ class _FakeBybitSession:
         return {"result": {"list": [{"lastPrice": "100"}]}}
 
 
-def _bybit_pipeline(snap, config, session=None, notifier=None):
+def _bybit_pipeline(snap, config, session=None, notifier=None, use_brackets=False,
+                    intent_params=None):
     from crypto_signal_bot.platform.execution.bybit_broker import build_broker
     from crypto_signal_bot.platform.execution.reconciler import Reconciler
 
@@ -135,8 +136,10 @@ def _bybit_pipeline(snap, config, session=None, notifier=None):
         execution_engine=ExecutionEngine(broker or InMemoryBroker(value=100.0)),
         shadow_runner=ShadowRunner(),
         portfolio_config=PortfolioConfig(k_pct=0.30, gross_target=1.0),
+        intent_params=intent_params,
         notifier=notifier,
         reconciler=Reconciler() if broker is not None else None,
+        use_brackets=use_brackets,
         execute=config.needs_exchange,
         lookback_days=10,
     )
@@ -221,3 +224,111 @@ def test_reconciliation_survives_broker_failure_without_crashing():
     assert result.execution is None
     assert result.reconciliation is not None and result.reconciliation.failed
     assert np.isfinite(result.shadow.daily_pnl)  # cycle continued
+
+
+# --- Stage 13: reduce-only TP/SL brackets in the daily cycle ----------------
+class _LiveSession(_FakeBybitSession):
+    """LIVE mock: records placed orders; can reject reduce-only legs."""
+
+    def __init__(self, reject_reduce_only=False):
+        self.orders = []
+        self.reject_reduce_only = reject_reduce_only
+
+    def get_instruments_info(self, **kw):  # no min-notional floor for this test
+        return {"result": {"list": [{
+            "symbol": kw.get("symbol", ""),
+            "priceFilter": {"tickSize": "0.01"},
+            "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "minNotionalValue": "0"},
+        }]}}
+
+    def place_order(self, **params):
+        self.orders.append(params)
+        if self.reject_reduce_only and params.get("reduceOnly"):
+            return {"retCode": 10001, "retMsg": "reduce-only rejected", "result": {}}
+        return {"retCode": 0, "retMsg": "OK", "result": {"orderId": "oid"}}
+
+    def get_positions(self, **kw):
+        return {"result": {"list": []}}
+
+    def get_wallet_balance(self, **kw):
+        return {"result": {"list": [{"totalEquity": "10000"}]}}
+
+
+def _bracket_legs(exec_report):
+    """Group an exec report's orders by their client_id suffix (entry/tp/sl)."""
+    from collections import Counter
+    return Counter(o.request.client_id.rsplit("-", 1)[1] for o in exec_report.orders)
+
+
+def test_paper_bracket_opens_position_and_places_reduce_only_tp_sl():
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
+    from crypto_signal_bot.platform.execution.domain import OrderStatus, OrderType
+    from crypto_signal_bot.platform.execution.intent_builder import IntentParams
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.PAPER)
+    result = _bybit_pipeline(_snapshot(asof), cfg, session=_FakeBybitSession(),
+                             use_brackets=True,
+                             intent_params=IntentParams(notional_per_name=100.0)).run_once(asof)
+
+    orders = result.execution.orders
+    legs = _bracket_legs(result.execution)
+    # one entry + one TP + one SL per traded intent
+    assert legs["entry"] == legs["tp"] == legs["sl"] == len(result.intents) > 0
+    # entries fill and open the position; TP/SL are reduce-only resting orders
+    for o in orders:
+        if o.request.order_type is OrderType.MARKET:
+            assert o.status is OrderStatus.FILLED and not o.request.reduce_only
+        else:
+            assert o.request.reduce_only and o.status is OrderStatus.PENDING
+    assert result.reconciliation is not None and result.reconciliation.ok
+    assert result.execution.resulting_state.positions  # a position was opened
+
+
+def test_bracket_orderlinkids_are_deterministic_for_idempotency():
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.PAPER)
+    ids1 = {o.request.client_id for o in
+            _bybit_pipeline(_snapshot(asof), cfg, session=_FakeBybitSession(),
+                            use_brackets=True).run_once(asof).execution.orders}
+    ids2 = {o.request.client_id for o in
+            _bybit_pipeline(_snapshot(asof), cfg, session=_FakeBybitSession(),
+                            use_brackets=True).run_once(asof).execution.orders}
+    # same as-of => identical orderLinkIds => Bybit dedupes a same-day re-run
+    assert ids1 == ids2 and all(cid.endswith(("-entry", "-tp", "-sl")) for cid in ids1)
+
+
+def test_bracket_tp_sl_rejection_leaves_position_and_continues():
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
+    from crypto_signal_bot.platform.execution.domain import OrderStatus
+    from crypto_signal_bot.platform.execution.intent_builder import IntentParams
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.LIVE)
+    result = _bybit_pipeline(_snapshot(asof), cfg,
+                             session=_LiveSession(reject_reduce_only=True),
+                             use_brackets=True,
+                             intent_params=IntentParams(notional_per_name=100.0)).run_once(asof)
+
+    rejected = [o for o in result.execution.orders
+                if o.request.reduce_only and o.status is OrderStatus.REJECTED]
+    entries = [o for o in result.execution.orders if not o.request.reduce_only]
+    assert rejected  # TP/SL failed and were recorded
+    assert all(o.status is OrderStatus.FILLED for o in entries)  # entry NOT closed
+    assert np.isfinite(result.shadow.daily_pnl)  # cycle continued
+
+
+def test_build_default_pipeline_enables_brackets_only_for_exchange_modes():
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
+    from crypto_signal_bot.platform.pipeline import build_default_pipeline
+
+    assert build_default_pipeline().use_brackets is False  # legacy default
+    assert build_default_pipeline(
+        bybit_config=BybitConfig(mode=TradingMode.SHADOW)).use_brackets is False
+    for mode in (TradingMode.PAPER, TradingMode.LIVE):
+        pipe = build_default_pipeline(
+            bybit_config=BybitConfig(api_key="k", api_secret="s", mode=mode),
+            bybit_session=_FakeBybitSession())
+        assert pipe.use_brackets is True

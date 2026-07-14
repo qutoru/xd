@@ -19,7 +19,7 @@ import pandas as pd
 from loguru import logger
 
 from crypto_signal_bot.platform.execution.engine import ExecutionEngine
-from crypto_signal_bot.platform.execution.domain import ExecutionReport
+from crypto_signal_bot.platform.execution.domain import ExecutionReport, OrderStatus, Side
 from crypto_signal_bot.platform.execution.intent import TradeIntent
 from crypto_signal_bot.platform.execution.intent_builder import IntentParams, build_trade_intents
 from crypto_signal_bot.platform.execution.reconciler import Reconciler, ReconciliationReport
@@ -44,6 +44,35 @@ class PipelineResult:
     reconciliation: ReconciliationReport | None = None
 
 
+def _bracket_expected_weights(intents: list[TradeIntent], nav: float) -> pd.Series:
+    """Expected exposure (as weights) implied by the bracket entries.
+
+    The bracket path sizes by ``intent.target_notional`` (not portfolio weight), so
+    reconciliation must compare the actual account against *that* target, not
+    ``book.weights``. The Reconciler itself is unchanged — only its input differs.
+    """
+    denom = nav if nav > 0 else 1.0
+    acc: dict[str, float] = {}
+    for intent in intents:
+        signed = intent.target_notional if intent.side is Side.BUY else -intent.target_notional
+        acc[intent.symbol] = acc.get(intent.symbol, 0.0) + signed
+    return pd.Series(acc, dtype="float64") / denom
+
+
+def _warn_on_unprotected(exec_report: ExecutionReport) -> None:
+    """Log a warning if any reduce-only TP/SL leg was rejected (position left open)."""
+    rejected = [
+        o for o in exec_report.orders
+        if o.request.reduce_only and o.status is OrderStatus.REJECTED
+    ]
+    if rejected:
+        logger.warning(
+            "{} reduce-only TP/SL leg(s) rejected; positions left UNPROTECTED "
+            "(not auto-closing): {}",
+            len(rejected), [o.request.client_id for o in rejected],
+        )
+
+
 class DailyPipeline:
     """One daily run: snapshot -> signals -> book -> execution -> shadow."""
 
@@ -60,6 +89,7 @@ class DailyPipeline:
         intent_params: IntentParams | None = None,
         notifier: TelegramNotifier | None = None,
         reconciler: Reconciler | None = None,
+        use_brackets: bool = False,
         lookback_days: int = 90,
         execute: bool = True,
     ) -> None:
@@ -73,6 +103,10 @@ class DailyPipeline:
         self.intent_params = intent_params or IntentParams()
         self.notifier = notifier
         self.reconciler = reconciler
+        # When True, open positions via the entry + reduce-only TP/SL bracket
+        # (execute_bracket_intents); when False, use the legacy weight-rebalance
+        # (execute(book)). A plain flag — the pipeline stays venue-agnostic.
+        self.use_brackets = use_brackets
         self.lookback_days = lookback_days
         self.execute = execute
         self._prev_book: TargetBook | None = None
@@ -102,12 +136,21 @@ class DailyPipeline:
         reconciliation = None
         if self.execute:
             try:
-                exec_report = self.execution_engine.execute(book)
+                if self.use_brackets:
+                    # Open the position AND place its reduce-only TP/SL in one existing
+                    # call (entry + reduce-only LIMIT TP + reduce-only STOP SL). Same-day
+                    # re-runs are idempotent via the date-stamped orderLinkId.
+                    exec_report = self.execution_engine.execute_bracket_intents(intents)
+                    expected = _bracket_expected_weights(intents, exec_report.resulting_state.value)
+                else:
+                    exec_report = self.execution_engine.execute(book)
+                    expected = book.weights
+                _warn_on_unprotected(exec_report)
                 if self.reconciler is not None:
                     # resulting_state is already broker.get_portfolio_state() — the
-                    # actual account. Reconcile it against the weights we targeted.
+                    # actual account. Reconcile it against what we targeted.
                     reconciliation = self.reconciler.reconcile(
-                        book.weights, exec_report.resulting_state, asof=book.asof
+                        expected, exec_report.resulting_state, asof=book.asof
                     )
             except Exception as exc:
                 logger.warning("Execution/reconciliation failed, continuing: {}", exc)
@@ -184,12 +227,15 @@ def build_default_pipeline(
     # --- single mode-selection point --------------------------------------
     reconciler: Reconciler | None = None
     execute = True
+    use_brackets = False
     if bybit_config is not None:
         selected = build_broker(bybit_config, session=bybit_session)  # None for SHADOW
         execute = bybit_config.needs_exchange
         if selected is not None:
             broker = selected
             reconciler = Reconciler()
+            # On a real venue, open positions with reduce-only TP/SL brackets.
+            use_brackets = True
 
     engine = ExecutionEngine(broker or InMemoryBroker(value=1.0))
     runner = ShadowRunner(shadow_params or ShadowParams())
@@ -202,6 +248,7 @@ def build_default_pipeline(
         budgets=budgets,
         notifier=notifier,
         reconciler=reconciler,
+        use_brackets=use_brackets,
         execute=execute,
         lookback_days=lookback_days,
     )

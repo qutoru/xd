@@ -68,6 +68,7 @@ PRODUCTION_MODULES = [
     "crypto_signal_bot.platform.execution.intent",
     "crypto_signal_bot.platform.execution.intent_builder",
     "crypto_signal_bot.platform.notify.telegram",
+    "crypto_signal_bot.platform.notify.notifier",
     "crypto_signal_bot.platform.pipeline",
     "crypto_signal_bot.app.cli",
     "main",

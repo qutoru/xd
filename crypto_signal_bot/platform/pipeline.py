@@ -20,6 +20,7 @@ from crypto_signal_bot.platform.execution.engine import ExecutionEngine
 from crypto_signal_bot.platform.execution.domain import ExecutionReport
 from crypto_signal_bot.platform.execution.intent import TradeIntent
 from crypto_signal_bot.platform.execution.intent_builder import IntentParams, build_trade_intents
+from crypto_signal_bot.platform.notify.notifier import NotifyResult, TelegramNotifier
 from crypto_signal_bot.platform.portfolio.book import TargetBook
 from crypto_signal_bot.platform.portfolio.builder import PortfolioConfig, build_target_book
 from crypto_signal_bot.platform.shadow.report import ShadowReport
@@ -36,6 +37,7 @@ class PipelineResult:
     shadow: ShadowReport
     execution: ExecutionReport | None
     intents: list[TradeIntent]
+    notify: NotifyResult | None = None
 
 
 class DailyPipeline:
@@ -52,6 +54,7 @@ class DailyPipeline:
         budgets: dict[str, float] | None = None,
         signal_configs: Mapping[str, Mapping[str, Any]] | None = None,
         intent_params: IntentParams | None = None,
+        notifier: TelegramNotifier | None = None,
         lookback_days: int = 90,
         execute: bool = True,
     ) -> None:
@@ -63,6 +66,7 @@ class DailyPipeline:
         self.budgets = budgets
         self.signal_configs = signal_configs or {}
         self.intent_params = intent_params or IntentParams()
+        self.notifier = notifier
         self.lookback_days = lookback_days
         self.execute = execute
         self._prev_book: TargetBook | None = None
@@ -91,6 +95,11 @@ class DailyPipeline:
             exec_report = self.execution_engine.execute(book)
 
         shadow_report = self.shadow_runner.step(book, snapshot, intents=intents)
+
+        notify_result = None
+        if self.notifier is not None:
+            notify_result = self.notifier.notify_intents(intents)
+
         self._prev_book = book
         return PipelineResult(
             asof=book.asof,
@@ -98,6 +107,7 @@ class DailyPipeline:
             shadow=shadow_report,
             execution=exec_report,
             intents=intents,
+            notify=notify_result,
         )
 
 
@@ -108,6 +118,7 @@ def build_default_pipeline(
     shadow_params=None,
     broker=None,
     budgets: dict[str, float] | None = None,
+    notifier: TelegramNotifier | None = None,
     lookback_days: int = 90,
 ) -> DailyPipeline:
     """Production wiring: Bybit data providers + in-memory broker + shadow runner.
@@ -136,5 +147,6 @@ def build_default_pipeline(
         shadow_runner=runner,
         portfolio_config=portfolio_config,
         budgets=budgets,
+        notifier=notifier,
         lookback_days=lookback_days,
     )

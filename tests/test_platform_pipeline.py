@@ -31,13 +31,14 @@ class _FakeSnapshotProvider:
     def snapshot(self, asof, lookback_days): return self.snap
 
 
-def _pipeline(snap, execute=True):
+def _pipeline(snap, execute=True, notifier=None):
     return DailyPipeline(
         _FakeSnapshotProvider(snap),
         signal_names=["alx"],
         execution_engine=ExecutionEngine(InMemoryBroker(value=100.0)),
         shadow_runner=ShadowRunner(),
         portfolio_config=PortfolioConfig(k_pct=0.30, gross_target=1.0),
+        notifier=notifier,
         lookback_days=10,
         execute=execute,
     )
@@ -77,3 +78,29 @@ def test_pipeline_execute_false_skips_orders():
     result = _pipeline(_snapshot(asof), execute=False).run_once(asof)
     assert result.execution is None
     assert np.isfinite(result.shadow.daily_pnl)  # shadow still runs
+
+
+def test_pipeline_delivers_intents_to_notifier():
+    from crypto_signal_bot.platform.notify.notifier import TelegramConfig, TelegramNotifier
+
+    class _FakeClient:
+        def __init__(self): self.sent = []
+        def send_message(self, *, chat_id, text): self.sent.append(text)
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    client = _FakeClient()
+    notifier = TelegramNotifier(
+        TelegramConfig(bot_token="T", chat_id="C"), client=client
+    )
+    result = _pipeline(_snapshot(asof), notifier=notifier).run_once(asof)
+
+    # every generated intent was delivered, and the result carries the outcome
+    assert result.notify is not None
+    assert result.notify.sent == len(result.intents) > 0
+    assert len(client.sent) == len(result.intents)
+
+
+def test_pipeline_without_notifier_leaves_notify_none():
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    result = _pipeline(_snapshot(asof)).run_once(asof)
+    assert result.notify is None

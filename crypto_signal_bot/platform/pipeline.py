@@ -16,10 +16,13 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
+from loguru import logger
+
 from crypto_signal_bot.platform.execution.engine import ExecutionEngine
 from crypto_signal_bot.platform.execution.domain import ExecutionReport
 from crypto_signal_bot.platform.execution.intent import TradeIntent
 from crypto_signal_bot.platform.execution.intent_builder import IntentParams, build_trade_intents
+from crypto_signal_bot.platform.execution.reconciler import Reconciler, ReconciliationReport
 from crypto_signal_bot.platform.notify.notifier import NotifyResult, TelegramNotifier
 from crypto_signal_bot.platform.portfolio.book import TargetBook
 from crypto_signal_bot.platform.portfolio.builder import PortfolioConfig, build_target_book
@@ -38,6 +41,7 @@ class PipelineResult:
     execution: ExecutionReport | None
     intents: list[TradeIntent]
     notify: NotifyResult | None = None
+    reconciliation: ReconciliationReport | None = None
 
 
 class DailyPipeline:
@@ -55,6 +59,7 @@ class DailyPipeline:
         signal_configs: Mapping[str, Mapping[str, Any]] | None = None,
         intent_params: IntentParams | None = None,
         notifier: TelegramNotifier | None = None,
+        reconciler: Reconciler | None = None,
         lookback_days: int = 90,
         execute: bool = True,
     ) -> None:
@@ -67,6 +72,7 @@ class DailyPipeline:
         self.signal_configs = signal_configs or {}
         self.intent_params = intent_params or IntentParams()
         self.notifier = notifier
+        self.reconciler = reconciler
         self.lookback_days = lookback_days
         self.execute = execute
         self._prev_book: TargetBook | None = None
@@ -90,12 +96,26 @@ class DailyPipeline:
             book, snapshot.closes, snapshot.returns, params=self.intent_params
         )
 
+        # Trade + reconcile. A broker/API failure must never abort the run: it is
+        # logged and surfaced as a failed reconciliation, and the cycle continues.
         exec_report = None
+        reconciliation = None
         if self.execute:
-            exec_report = self.execution_engine.execute(book)
+            try:
+                exec_report = self.execution_engine.execute(book)
+                if self.reconciler is not None:
+                    # resulting_state is already broker.get_portfolio_state() — the
+                    # actual account. Reconcile it against the weights we targeted.
+                    reconciliation = self.reconciler.reconcile(
+                        book.weights, exec_report.resulting_state, asof=book.asof
+                    )
+            except Exception as exc:
+                logger.warning("Execution/reconciliation failed, continuing: {}", exc)
+                reconciliation = ReconciliationReport.errored(book.asof, str(exc))
 
         shadow_report = self.shadow_runner.step(book, snapshot, intents=intents)
 
+        # Notify only after reconciliation, so alerts reflect the synchronized state.
         notify_result = None
         if self.notifier is not None:
             notify_result = self.notifier.notify_intents(intents)
@@ -108,6 +128,7 @@ class DailyPipeline:
             execution=exec_report,
             intents=intents,
             notify=notify_result,
+            reconciliation=reconciliation,
         )
 
 
@@ -119,12 +140,20 @@ def build_default_pipeline(
     broker=None,
     budgets: dict[str, float] | None = None,
     notifier: TelegramNotifier | None = None,
+    bybit_config=None,
+    bybit_session=None,
     lookback_days: int = 90,
 ) -> DailyPipeline:
-    """Production wiring: Bybit data providers + in-memory broker + shadow runner.
+    """Production wiring: Bybit data providers + mode-selected broker + shadow.
 
-    Bybit providers are imported lazily so this module stays offline-importable;
-    they are thin wrappers over Production Core (``crypto_signal_bot.data``).
+    ``bybit_config`` is the single point that selects the trading mode (SHADOW /
+    PAPER / LIVE). ``build_broker`` maps the mode to a broker (None for SHADOW) and
+    ``needs_exchange`` decides whether orders are actually routed — there is no
+    mode branching anywhere else. When it is omitted, wiring falls back to the
+    legacy in-memory broker so existing callers are unchanged.
+
+    Bybit providers/broker are imported lazily so this module stays
+    offline-importable; they are thin wrappers over Production Core.
     """
     from crypto_signal_bot.platform.data.bybit_source import (
         BybitDailyBarProvider,
@@ -132,12 +161,24 @@ def build_default_pipeline(
         BybitUniverseProvider,
     )
     from crypto_signal_bot.platform.data.snapshot import DailySnapshotProvider
+    from crypto_signal_bot.platform.execution.bybit_broker import build_broker
     from crypto_signal_bot.platform.execution.fake_broker import InMemoryBroker
     from crypto_signal_bot.platform.shadow.report import ShadowParams
 
     snapshot_provider = DailySnapshotProvider(
         BybitUniverseProvider(), BybitDailyBarProvider(), BybitFundingProvider()
     )
+
+    # --- single mode-selection point --------------------------------------
+    reconciler: Reconciler | None = None
+    execute = True
+    if bybit_config is not None:
+        selected = build_broker(bybit_config, session=bybit_session)  # None for SHADOW
+        execute = bybit_config.needs_exchange
+        if selected is not None:
+            broker = selected
+            reconciler = Reconciler()
+
     engine = ExecutionEngine(broker or InMemoryBroker(value=1.0))
     runner = ShadowRunner(shadow_params or ShadowParams())
     return DailyPipeline(
@@ -148,5 +189,7 @@ def build_default_pipeline(
         portfolio_config=portfolio_config,
         budgets=budgets,
         notifier=notifier,
+        reconciler=reconciler,
+        execute=execute,
         lookback_days=lookback_days,
     )

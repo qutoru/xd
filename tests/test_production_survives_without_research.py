@@ -65,6 +65,8 @@ PRODUCTION_MODULES = [
     "crypto_signal_bot.platform.execution.broker",
     "crypto_signal_bot.platform.execution.engine",
     "crypto_signal_bot.platform.execution.fake_broker",
+    "crypto_signal_bot.platform.execution.bybit_config",
+    "crypto_signal_bot.platform.execution.bybit_broker",
     "crypto_signal_bot.platform.execution.intent",
     "crypto_signal_bot.platform.execution.intent_builder",
     "crypto_signal_bot.platform.notify.telegram",

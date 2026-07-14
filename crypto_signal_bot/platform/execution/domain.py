@@ -21,6 +21,7 @@ class Side(str, Enum):
 class OrderType(str, Enum):
     MARKET = "market"
     LIMIT = "limit"
+    STOP = "stop"  # stop-market (used for reduce-only stop-loss brackets)
 
 
 class OrderStatus(str, Enum):
@@ -33,12 +34,20 @@ class OrderStatus(str, Enum):
 
 @dataclass(frozen=True)
 class OrderRequest:
-    """An abstract instruction to trade ``quantity`` (>0) notional of a symbol."""
+    """An abstract instruction to trade ``quantity`` (>0) notional of a symbol.
+
+    TP/SL are not fields here: a bracket is expressed as *separate* reduce-only
+    OrderRequests (a LIMIT take-profit and a STOP stop-loss), each with its own
+    ``price`` and ``reduce_only=True``. This keeps the request broker-facing and
+    venue-agnostic — the Broker places whatever single order it is handed.
+    """
 
     symbol: str
     side: Side
     quantity: float  # absolute notional to trade
     order_type: OrderType = OrderType.MARKET
+    price: float | None = None  # limit price (LIMIT) / trigger price (STOP)
+    reduce_only: bool = False  # close-only leg (take-profit / stop-loss)
     target_weight: float | None = None  # metadata only
     client_id: str | None = None
 

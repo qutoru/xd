@@ -7,7 +7,6 @@ import pathlib
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from crypto_signal_bot.platform.execution.domain import (
     ExecutionReport,
@@ -80,17 +79,6 @@ def test_broker_reject_path():
     statuses = {o.request.symbol: o.status for o in report.orders}
     assert statuses["A"] == OrderStatus.FILLED
     assert statuses["B"] == OrderStatus.REJECTED
-
-
-def test_bybit_broker_does_not_trade():
-    from crypto_signal_bot.platform.execution.bybit_broker import BybitBroker
-    from crypto_signal_bot.platform.execution.domain import OrderRequest
-
-    broker = BybitBroker()
-    with pytest.raises(NotImplementedError):
-        broker.submit(OrderRequest("A", Side.BUY, 1.0))
-    with pytest.raises(NotImplementedError):
-        broker.get_portfolio_state()
 
 
 def _imports(path):

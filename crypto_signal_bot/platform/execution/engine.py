@@ -19,6 +19,8 @@ from crypto_signal_bot.platform.execution.domain import (
     OrderType,
     Side,
 )
+
+_OPPOSITE: dict[Side, Side] = {Side.BUY: Side.SELL, Side.SELL: Side.BUY}
 from crypto_signal_bot.platform.execution.intent import TradeIntent
 from crypto_signal_bot.platform.portfolio.book import TargetBook
 
@@ -57,12 +59,8 @@ class ExecutionEngine:
             )
         return requests
 
-    def execute(self, target_book: TargetBook, state=None) -> ExecutionReport:
-        """Plan and route orders; return an ExecutionReport (no strategy logic)."""
-        if state is None:
-            state = self.broker.get_portfolio_state()
-        requests = self.plan(target_book, state)
-
+    def _route(self, requests: list[OrderRequest], asof: pd.Timestamp) -> ExecutionReport:
+        """Submit each OrderRequest through the Broker and collect the report."""
         orders: list[Order] = []
         for i, req in enumerate(requests):
             result = self.broker.submit(req)
@@ -75,10 +73,15 @@ class ExecutionEngine:
                 )
             )
         return ExecutionReport(
-            asof=target_book.asof,
-            orders=orders,
-            resulting_state=self.broker.get_portfolio_state(),
+            asof=asof, orders=orders, resulting_state=self.broker.get_portfolio_state()
         )
+
+    def execute(self, target_book: TargetBook, state=None) -> ExecutionReport:
+        """Plan and route orders; return an ExecutionReport (no strategy logic)."""
+        if state is None:
+            state = self.broker.get_portfolio_state()
+        requests = self.plan(target_book, state)
+        return self._route(requests, target_book.asof)
 
     def build_orders(self, intents: Sequence[TradeIntent]) -> list[OrderRequest]:
         """Translate strategy TradeIntents into broker-facing OrderRequests.
@@ -103,23 +106,80 @@ class ExecutionEngine:
             )
         return requests
 
+    def _intents_asof(
+        self, intents: Sequence[TradeIntent], asof: pd.Timestamp | None
+    ) -> pd.Timestamp:
+        if asof is not None:
+            return asof
+        return next(
+            (i.timestamp for i in intents if i.timestamp is not None),
+            pd.Timestamp.now(tz="UTC"),
+        )
+
     def execute_intents(
         self, intents: Sequence[TradeIntent], *, asof: pd.Timestamp | None = None
     ) -> ExecutionReport:
         """Convert TradeIntents to OrderRequests and route them via the Broker."""
         requests = self.build_orders(intents)
-        orders: list[Order] = []
-        for i, req in enumerate(requests):
-            result = self.broker.submit(req)
+        return self._route(requests, self._intents_asof(intents, asof))
+
+    def build_bracket_orders(self, intent: TradeIntent) -> list[OrderRequest]:
+        """Turn one TradeIntent into an entry + reduce-only TP/SL bracket.
+
+        Emits a MARKET entry and, when the intent carries them, a reduce-only
+        LIMIT take-profit and a reduce-only STOP stop-loss — each a plain
+        OrderRequest on the *opposite* side. The bracket levels live only on
+        these close-only requests, so the Broker still receives nothing but
+        OrderRequests and stays venue-agnostic. TP/SL translation (contracts,
+        trigger direction) is the Broker's job.
+        """
+        ts = "" if intent.timestamp is None else pd.Timestamp(intent.timestamp).date()
+        tag = intent.strategy or "intent"
+        notional = abs(intent.target_notional)
+        close_side = _OPPOSITE[intent.side]
+
+        orders = [
+            OrderRequest(
+                symbol=intent.symbol,
+                side=intent.side,
+                quantity=notional,
+                order_type=OrderType.MARKET,
+                client_id=f"{tag}-{intent.symbol}-{ts}-entry",
+            )
+        ]
+        if intent.take_profit is not None:
             orders.append(
-                Order(id=req.client_id or f"ord-{i}", request=req,
-                      status=result.status, result=result)
+                OrderRequest(
+                    symbol=intent.symbol,
+                    side=close_side,
+                    quantity=notional,
+                    order_type=OrderType.LIMIT,
+                    price=intent.take_profit,
+                    reduce_only=True,
+                    client_id=f"{tag}-{intent.symbol}-{ts}-tp",
+                )
             )
-        if asof is None:
-            asof = next(
-                (i.timestamp for i in intents if i.timestamp is not None),
-                pd.Timestamp.now(tz="UTC"),
+        if intent.stop_loss is not None:
+            orders.append(
+                OrderRequest(
+                    symbol=intent.symbol,
+                    side=close_side,
+                    quantity=notional,
+                    order_type=OrderType.STOP,
+                    price=intent.stop_loss,
+                    reduce_only=True,
+                    client_id=f"{tag}-{intent.symbol}-{ts}-sl",
+                )
             )
-        return ExecutionReport(
-            asof=asof, orders=orders, resulting_state=self.broker.get_portfolio_state()
-        )
+        return orders
+
+    def execute_bracket_intents(
+        self, intents: Sequence[TradeIntent], *, asof: pd.Timestamp | None = None
+    ) -> ExecutionReport:
+        """Route entry + reduce-only TP/SL brackets for each intent via the Broker."""
+        requests: list[OrderRequest] = []
+        for intent in intents:
+            if abs(intent.target_notional) <= self.min_notional:
+                continue
+            requests.extend(self.build_bracket_orders(intent))
+        return self._route(requests, self._intents_asof(intents, asof))

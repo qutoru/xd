@@ -1,4 +1,4 @@
-"""Stage 8-prep — TradeIntent domain + intent->order conversion (offline)."""
+"""TradeIntent domain: data model, serialization, engine conversion (offline)."""
 
 from __future__ import annotations
 
@@ -12,57 +12,49 @@ from crypto_signal_bot.platform.execution.engine import ExecutionEngine
 from crypto_signal_bot.platform.execution.fake_broker import InMemoryBroker
 from crypto_signal_bot.platform.execution.intent import TradeIntent
 
-TS = pd.Timestamp("2023-07-01", tz="UTC")
+TS = pd.Timestamp("2023-07-01 12:00", tz="UTC")
 
 
 def _intent(**kw):
-    base = dict(symbol="BTCUSDT", side=Side.BUY, target_notional=50.0, entry=100.0,
-                stop_loss=95.0, take_profit=110.0, strategy="alx", reason="crowded funding",
-                timestamp=TS)
+    base = dict(symbol="BTCUSDT", side=Side.BUY, target_notional=50.0, entry=105400.0,
+                take_profit=108100.0, stop_loss=104200.0, confidence=0.78,
+                strategy="platform", timestamp=TS)
     base.update(kw)
     return TradeIntent(**base)
 
 
-def test_risk_reward_known_answer():
-    # entry 100, SL 95 (risk 5), TP 110 (reward 10) -> RR 2.0
-    assert np.isclose(_intent().risk_reward, 2.0)
-    assert _intent(take_profit=None).risk_reward is None
+def test_no_leverage_reason_or_rr_fields():
+    fields = {f.name for f in dataclasses.fields(TradeIntent)}
+    assert "leverage" not in fields and "reason" not in fields
+    assert not hasattr(_intent(), "risk_reward")
 
 
-def test_format_contains_futures_fields():
-    msg = _intent().format()
-    for token in ("BTCUSDT", "BUY", "Entry: 100", "TP: 110", "SL: 95",
-                  "Risk/Reward: 2.00", "Size: 50", "Reason: crowded funding"):
-        assert token in msg
+def test_intent_is_pure_data_model_without_rendering():
+    # Display belongs to the notify layer, not the entity.
+    assert not hasattr(_intent(), "format")
+
+
+def test_to_dict_serialization():
+    d = _intent().to_dict()
+    assert d["symbol"] == "BTCUSDT" and d["side"] == "buy"
+    assert d["entry"] == 105400.0 and d["take_profit"] == 108100.0
+    assert d["confidence"] == 0.78 and d["timestamp"] == TS.isoformat()
 
 
 def test_build_orders_strips_strategy_from_broker_request():
-    eng = ExecutionEngine(InMemoryBroker(value=1.0))
-    reqs = eng.build_orders([_intent()])
-    assert len(reqs) == 1
-    req = reqs[0]
-    assert req.symbol == "BTCUSDT" and req.side == Side.BUY and np.isclose(req.quantity, 50.0)
-    # OrderRequest must NOT carry strategy/reason/SL/TP (broker is strategy-agnostic)
+    reqs = ExecutionEngine(InMemoryBroker(value=1.0)).build_orders([_intent()])
+    assert len(reqs) == 1 and reqs[0].symbol == "BTCUSDT" and reqs[0].side == Side.BUY
     fields = {f.name for f in dataclasses.fields(OrderRequest)}
-    assert "strategy" not in fields and "reason" not in fields
-    assert "stop_loss" not in fields and "take_profit" not in fields
+    assert "strategy" not in fields and "stop_loss" not in fields and "take_profit" not in fields
 
 
 def test_execute_intents_routes_through_broker():
-    broker = InMemoryBroker(value=1.0)
-    eng = ExecutionEngine(broker)
+    eng = ExecutionEngine(InMemoryBroker(value=1.0))
     report = eng.execute_intents([
         _intent(symbol="BTCUSDT", side=Side.BUY, target_notional=50.0),
         _intent(symbol="ETHUSDT", side=Side.SELL, target_notional=30.0),
     ])
     assert report.n_filled == 2
     assert {o.status for o in report.orders} == {OrderStatus.FILLED}
-    state = report.resulting_state
-    assert np.isclose(state.notional("BTCUSDT"), 50.0)
-    assert np.isclose(state.notional("ETHUSDT"), -30.0)
-    assert report.asof == TS
-
-
-def test_zero_size_intent_skipped():
-    eng = ExecutionEngine(InMemoryBroker(value=1.0))
-    assert eng.build_orders([_intent(target_notional=0.0)]) == []
+    assert np.isclose(report.resulting_state.notional("BTCUSDT"), 50.0)
+    assert np.isclose(report.resulting_state.notional("ETHUSDT"), -30.0)

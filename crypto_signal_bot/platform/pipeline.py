@@ -18,6 +18,8 @@ import pandas as pd
 
 from crypto_signal_bot.platform.execution.engine import ExecutionEngine
 from crypto_signal_bot.platform.execution.domain import ExecutionReport
+from crypto_signal_bot.platform.execution.intent import TradeIntent
+from crypto_signal_bot.platform.execution.intent_builder import IntentParams, build_trade_intents
 from crypto_signal_bot.platform.portfolio.book import TargetBook
 from crypto_signal_bot.platform.portfolio.builder import PortfolioConfig, build_target_book
 from crypto_signal_bot.platform.shadow.report import ShadowReport
@@ -33,6 +35,7 @@ class PipelineResult:
     book: TargetBook
     shadow: ShadowReport
     execution: ExecutionReport | None
+    intents: list[TradeIntent]
 
 
 class DailyPipeline:
@@ -48,6 +51,7 @@ class DailyPipeline:
         portfolio_config: PortfolioConfig | None = None,
         budgets: dict[str, float] | None = None,
         signal_configs: Mapping[str, Mapping[str, Any]] | None = None,
+        intent_params: IntentParams | None = None,
         lookback_days: int = 90,
         execute: bool = True,
     ) -> None:
@@ -58,6 +62,7 @@ class DailyPipeline:
         self.portfolio_config = portfolio_config or PortfolioConfig()
         self.budgets = budgets
         self.signal_configs = signal_configs or {}
+        self.intent_params = intent_params or IntentParams()
         self.lookback_days = lookback_days
         self.execute = execute
         self._prev_book: TargetBook | None = None
@@ -77,13 +82,23 @@ class DailyPipeline:
             config=self.portfolio_config,
         )
 
+        intents = build_trade_intents(
+            book, snapshot.closes, snapshot.returns, params=self.intent_params
+        )
+
         exec_report = None
         if self.execute:
             exec_report = self.execution_engine.execute(book)
 
-        shadow_report = self.shadow_runner.step(book, snapshot)
+        shadow_report = self.shadow_runner.step(book, snapshot, intents=intents)
         self._prev_book = book
-        return PipelineResult(asof=book.asof, book=book, shadow=shadow_report, execution=exec_report)
+        return PipelineResult(
+            asof=book.asof,
+            book=book,
+            shadow=shadow_report,
+            execution=exec_report,
+            intents=intents,
+        )
 
 
 def build_default_pipeline(

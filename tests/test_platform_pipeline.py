@@ -57,6 +57,9 @@ def test_pipeline_runs_full_chain():
     # Shadow produced a finite virtual PnL
     assert np.isfinite(result.shadow.daily_pnl)
     assert result.shadow.asof == result.book.asof
+    # Futures TradeIntents were generated for the traded names
+    assert result.intents
+    assert all(i.entry is not None and i.confidence is not None for i in result.intents)
 
 
 def test_pipeline_carries_prev_book_for_turnover():

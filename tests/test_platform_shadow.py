@@ -95,6 +95,21 @@ def test_runner_save_roundtrip(tmp_path):
     assert len(pd.read_parquet(p)) == 1
 
 
+def test_runner_stores_and_saves_intents(tmp_path):
+    from crypto_signal_bot.platform.execution.domain import Side
+    from crypto_signal_bot.platform.execution.intent import TradeIntent
+
+    runner = ShadowRunner(ShadowParams(fee_rate=0.0, slippage_rate=0.0))
+    snap = _snapshot([0.01, 0, 0, 0], [0, 0, 0, 0])
+    it = TradeIntent(symbol="A", side=Side.BUY, target_notional=1.0, entry=100.0,
+                     take_profit=110.0, stop_loss=95.0, confidence=0.5, timestamp=ASOF)
+    runner.step(_book([0.5, -0.5, 0, 0]), snap, intents=[it])
+    frame = runner.intents_frame()
+    assert len(frame) == 1 and frame.iloc[0]["symbol"] == "A"
+    p = runner.save_intents(tmp_path / "intents.parquet")
+    assert p.exists() and len(pd.read_parquet(p)) == 1
+
+
 def test_shadow_layer_is_execution_and_alpha_agnostic():
     root = pathlib.Path(__file__).resolve().parents[1]
     shadow_dir = root / "crypto_signal_bot" / "platform" / "shadow"

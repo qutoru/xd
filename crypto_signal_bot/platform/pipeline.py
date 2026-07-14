@@ -142,6 +142,7 @@ def build_default_pipeline(
     notifier: TelegramNotifier | None = None,
     bybit_config=None,
     bybit_session=None,
+    symbols: Sequence[str] | None = None,
     lookback_days: int = 90,
 ) -> DailyPipeline:
     """Production wiring: Bybit data providers + mode-selected broker + shadow.
@@ -151,6 +152,11 @@ def build_default_pipeline(
     ``needs_exchange`` decides whether orders are actually routed — there is no
     mode branching anywhere else. When it is omitted, wiring falls back to the
     legacy in-memory broker so existing callers are unchanged.
+
+    ``symbols``, when given, pins the traded universe to that explicit list (data
+    is still pulled from mainnet), keeping the symbol set compatible with the
+    execution venue (e.g. Bybit testnet). When omitted, the live mainnet top-N
+    universe is used, so existing callers are unchanged.
 
     Bybit providers/broker are imported lazily so this module stays
     offline-importable; they are thin wrappers over Production Core.
@@ -165,8 +171,14 @@ def build_default_pipeline(
     from crypto_signal_bot.platform.execution.fake_broker import InMemoryBroker
     from crypto_signal_bot.platform.shadow.report import ShadowParams
 
+    if symbols:
+        from crypto_signal_bot.platform.data.static_universe import StaticUniverseProvider
+        universe_provider = StaticUniverseProvider(list(symbols))
+    else:
+        universe_provider = BybitUniverseProvider()
+
     snapshot_provider = DailySnapshotProvider(
-        BybitUniverseProvider(), BybitDailyBarProvider(), BybitFundingProvider()
+        universe_provider, BybitDailyBarProvider(), BybitFundingProvider()
     )
 
     # --- single mode-selection point --------------------------------------

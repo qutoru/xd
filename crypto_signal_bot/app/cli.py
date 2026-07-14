@@ -167,6 +167,21 @@ def cmd_shadow(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_trade(args: argparse.Namespace) -> int:
+    """Run one daily platform cycle in the .env-selected mode (SHADOW/PAPER/LIVE).
+
+    Mode and all Bybit/Telegram settings come from the environment only; this
+    reuses the existing ``build_default_pipeline`` — no separate pipeline.
+    """
+    import pandas as pd
+
+    from crypto_signal_bot.app.trade_runner import run_trade
+
+    signals = tuple(s for s in args.signals.split(",") if s)
+    asof = pd.Timestamp(args.asof, tz="UTC") if args.asof else None
+    return run_trade(signals=signals, asof=asof)
+
+
 def _add_symbol_arg(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--symbol", default=None,
                      help="Target a single symbol instead of the whole universe.")
@@ -268,6 +283,15 @@ def build_parser() -> argparse.ArgumentParser:
     shadow_parser.add_argument("--asof", default=None,
                                help="As-of date YYYY-MM-DD (default: today, UTC).")
     shadow_parser.set_defaults(func=cmd_shadow)
+
+    trade_parser = subparsers.add_parser(
+        "trade",
+        help="Run one platform cycle in the .env-selected mode (SHADOW/PAPER/LIVE).")
+    trade_parser.add_argument("--signals", default="alx",
+                              help="Comma-separated signal names to combine (default: alx).")
+    trade_parser.add_argument("--asof", default=None,
+                              help="As-of date YYYY-MM-DD (default: today, UTC).")
+    trade_parser.set_defaults(func=cmd_trade)
 
     return parser
 

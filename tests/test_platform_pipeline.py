@@ -142,6 +142,16 @@ def _bybit_pipeline(snap, config, session=None, notifier=None):
     )
 
 
+def test_symbols_pin_the_universe_to_a_static_compatible_set():
+    from crypto_signal_bot.platform.data.static_universe import StaticUniverseProvider
+    from crypto_signal_bot.platform.pipeline import build_default_pipeline
+
+    pipe = build_default_pipeline(symbols=["BTCUSDT", "ETHUSDT"])
+    provider = pipe.snapshot_provider.universe
+    assert isinstance(provider, StaticUniverseProvider)
+    assert provider.universe(pd.Timestamp.now(tz="UTC")) == ["BTCUSDT", "ETHUSDT"]
+
+
 def test_build_default_pipeline_is_the_single_mode_selection_point():
     from crypto_signal_bot.platform.execution.bybit_broker import BybitBroker
     from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode

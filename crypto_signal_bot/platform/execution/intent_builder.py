@@ -54,8 +54,15 @@ def build_trade_intents(
     returns: pd.DataFrame,
     *,
     params: IntentParams = IntentParams(),
+    notionals: pd.Series | None = None,
 ) -> list[TradeIntent]:
-    """Turn a dollar-neutral TargetBook into per-symbol TradeIntents."""
+    """Turn a dollar-neutral TargetBook into per-symbol TradeIntents.
+
+    ``notionals`` (signed target notional per symbol, e.g. from RiskManager) sets
+    the position size and side when supplied — symbols absent from it get no
+    intent. IntentBuilder never computes risk itself; without ``notionals`` it
+    falls back to the flat ``params.notional_per_name``.
+    """
     active = book.weights[book.weights != 0.0]
     if active.empty:
         return []
@@ -71,14 +78,26 @@ def build_trade_intents(
         v = float(vol.get(symbol, float("nan")))
         if not (entry > 0) or not (v >= 0):
             continue
-        sign = 1.0 if weight > 0 else -1.0
-        side = Side.BUY if weight > 0 else Side.SELL
+
+        if notionals is not None:
+            if symbol not in notionals.index:
+                continue  # sized out (below min_notional) -> no intent
+            signed = float(notionals[symbol])
+            if signed == 0.0:
+                continue
+            side = Side.BUY if signed > 0 else Side.SELL
+            target_notional = abs(signed)
+        else:
+            side = Side.BUY if weight > 0 else Side.SELL
+            target_notional = params.notional_per_name
+
+        sign = 1.0 if side is Side.BUY else -1.0
         conf = float(conf_src.get(symbol, 0.0) / cmax) if cmax > 0 else 0.0
         intents.append(
             TradeIntent(
                 symbol=symbol,
                 side=side,
-                target_notional=params.notional_per_name,
+                target_notional=target_notional,
                 entry=entry,
                 take_profit=entry * (1.0 + sign * params.tp_mult * v),
                 stop_loss=entry * (1.0 - sign * params.sl_mult * v),

@@ -74,3 +74,20 @@ def test_empty_book_yields_no_intents():
     closes, returns = _frames()
     empty = TargetBook(asof=TS, weights=pd.Series({"A": 0.0, "F": 0.0}))
     assert build_trade_intents(empty, closes, returns) == []
+
+
+def test_notionals_set_size_and_side_and_drop_missing_symbols():
+    closes, returns = _frames()
+    # F is sized out (absent from notionals) -> no intent; A sized to 2000 long
+    notionals = pd.Series({"A": 2000.0})
+    intents = build_trade_intents(_book(), closes, returns, notionals=notionals)
+    assert {i.symbol for i in intents} == {"A"}  # F produced no intent
+    ia = intents[0]
+    assert ia.side == Side.BUY and np.isclose(ia.target_notional, 2000.0)
+
+
+def test_notionals_negative_means_short():
+    closes, returns = _frames()
+    notionals = pd.Series({"A": -1500.0})
+    intents = build_trade_intents(_book(), closes, returns, notionals=notionals)
+    assert intents[0].side == Side.SELL and np.isclose(intents[0].target_notional, 1500.0)

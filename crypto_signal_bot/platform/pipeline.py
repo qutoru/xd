@@ -20,12 +20,14 @@ from loguru import logger
 
 from crypto_signal_bot.platform.execution.engine import ExecutionEngine
 from crypto_signal_bot.platform.execution.domain import ExecutionReport, OrderStatus, Side
+from crypto_signal_bot.platform.execution.fake_broker import InMemoryBroker
 from crypto_signal_bot.platform.execution.intent import TradeIntent
 from crypto_signal_bot.platform.execution.intent_builder import IntentParams, build_trade_intents
 from crypto_signal_bot.platform.execution.reconciler import Reconciler, ReconciliationReport
 from crypto_signal_bot.platform.notify.notifier import NotifyResult, TelegramNotifier
 from crypto_signal_bot.platform.portfolio.book import TargetBook
 from crypto_signal_bot.platform.portfolio.builder import PortfolioConfig, build_target_book
+from crypto_signal_bot.platform.risk.manager import RiskManager
 from crypto_signal_bot.platform.shadow.report import ShadowReport
 from crypto_signal_bot.platform.shadow.runner import ShadowRunner
 from crypto_signal_bot.platform.signals.registry import load_signal
@@ -89,6 +91,8 @@ class DailyPipeline:
         intent_params: IntentParams | None = None,
         notifier: TelegramNotifier | None = None,
         reconciler: Reconciler | None = None,
+        risk_manager: RiskManager | None = None,
+        nav: float = 10_000.0,
         use_brackets: bool = False,
         lookback_days: int = 90,
         execute: bool = True,
@@ -103,6 +107,13 @@ class DailyPipeline:
         self.intent_params = intent_params or IntentParams()
         self.notifier = notifier
         self.reconciler = reconciler
+        # Risk sizing: TargetBook weights -> per-symbol target notional. When None,
+        # IntentBuilder falls back to a flat notional (legacy). ``nav`` is only a
+        # *fallback* account equity: with a real broker (PAPER/LIVE) sizing reads
+        # the true equity from ``broker.get_portfolio_state().value`` instead (see
+        # ``_resolve_nav``), so risk sizing and reconciliation share one NAV.
+        self.risk_manager = risk_manager
+        self.nav = nav
         # When True, open positions via the entry + reduce-only TP/SL bracket
         # (execute_bracket_intents); when False, use the legacy weight-rebalance
         # (execute(book)). A plain flag — the pipeline stays venue-agnostic.
@@ -110,6 +121,25 @@ class DailyPipeline:
         self.lookback_days = lookback_days
         self.execute = execute
         self._prev_book: TargetBook | None = None
+
+    def _resolve_nav(self) -> float:
+        """NAV used for risk sizing — the single source of truth for account size.
+
+        A real broker's ``get_portfolio_state().value`` (Bybit ``totalEquity`` in
+        LIVE, ``paper_equity`` in PAPER) *is* that source of truth, so sizing and
+        reconciliation scale against the same equity. ``self.nav`` is used only as
+        a fallback where there is no real account to read: an ``InMemoryBroker``
+        (offline/legacy) or no broker at all (Shadow). A broker read that raises
+        must never abort the run, so it too degrades to the fallback.
+        """
+        broker = getattr(self.execution_engine, "broker", None)
+        if broker is None or isinstance(broker, InMemoryBroker):
+            return self.nav
+        try:
+            return float(broker.get_portfolio_state().value)
+        except Exception as exc:  # network/credential failure -> fallback, never abort
+            logger.warning("Broker NAV read failed; using fallback nav {}: {}", self.nav, exc)
+            return self.nav
 
     def run_once(self, asof: pd.Timestamp) -> PipelineResult:
         snapshot = self.snapshot_provider.snapshot(asof, self.lookback_days)
@@ -126,8 +156,15 @@ class DailyPipeline:
             config=self.portfolio_config,
         )
 
+        # Risk layer sits between Portfolio and IntentBuilder: it turns weights into
+        # per-symbol target notionals; IntentBuilder only renders them into intents.
+        # NAV comes from the real broker when one exists (see _resolve_nav).
+        notionals = None
+        if self.risk_manager is not None:
+            notionals = self.risk_manager.size(book, self._resolve_nav())
         intents = build_trade_intents(
-            book, snapshot.closes, snapshot.returns, params=self.intent_params
+            book, snapshot.closes, snapshot.returns,
+            params=self.intent_params, notionals=notionals,
         )
 
         # Trade + reconcile. A broker/API failure must never abort the run: it is
@@ -143,6 +180,13 @@ class DailyPipeline:
                     exec_report = self.execution_engine.execute_bracket_intents(intents)
                     expected = _bracket_expected_weights(intents, exec_report.resulting_state.value)
                 else:
+                    # Legacy weight-rebalance. NOTE: this path sizes orders from
+                    # book.weights x broker equity and does NOT consume the risk
+                    # notionals — RiskManager governs only the bracket path (and the
+                    # intents used by shadow/notify). It is reachable in production
+                    # solely with the offline InMemoryBroker (real venues force
+                    # use_brackets=True in build_default_pipeline), so no real
+                    # account is ever sized outside RiskManager.
                     exec_report = self.execution_engine.execute(book)
                     expected = book.weights
                 _warn_on_unprotected(exec_report)
@@ -186,6 +230,8 @@ def build_default_pipeline(
     bybit_config=None,
     bybit_session=None,
     symbols: Sequence[str] | None = None,
+    risk_config=None,
+    nav: float = 10_000.0,
     lookback_days: int = 90,
 ) -> DailyPipeline:
     """Production wiring: Bybit data providers + mode-selected broker + shadow.
@@ -237,6 +283,8 @@ def build_default_pipeline(
             # On a real venue, open positions with reduce-only TP/SL brackets.
             use_brackets = True
 
+    from crypto_signal_bot.platform.risk.manager import RiskConfig
+
     engine = ExecutionEngine(broker or InMemoryBroker(value=1.0))
     runner = ShadowRunner(shadow_params or ShadowParams())
     return DailyPipeline(
@@ -248,6 +296,8 @@ def build_default_pipeline(
         budgets=budgets,
         notifier=notifier,
         reconciler=reconciler,
+        risk_manager=RiskManager(risk_config or RiskConfig()),
+        nav=nav,
         use_brackets=use_brackets,
         execute=execute,
         lookback_days=lookback_days,

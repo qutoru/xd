@@ -125,7 +125,7 @@ class _FakeBybitSession:
 
 
 def _bybit_pipeline(snap, config, session=None, notifier=None, use_brackets=False,
-                    intent_params=None):
+                    intent_params=None, risk_manager=None, nav=10_000.0):
     from crypto_signal_bot.platform.execution.bybit_broker import build_broker
     from crypto_signal_bot.platform.execution.reconciler import Reconciler
 
@@ -139,6 +139,8 @@ def _bybit_pipeline(snap, config, session=None, notifier=None, use_brackets=Fals
         intent_params=intent_params,
         notifier=notifier,
         reconciler=Reconciler() if broker is not None else None,
+        risk_manager=risk_manager,
+        nav=nav,
         use_brackets=use_brackets,
         execute=config.needs_exchange,
         lookback_days=10,
@@ -332,3 +334,138 @@ def test_build_default_pipeline_enables_brackets_only_for_exchange_modes():
             bybit_config=BybitConfig(api_key="k", api_secret="s", mode=mode),
             bybit_session=_FakeBybitSession())
         assert pipe.use_brackets is True
+
+
+# --- Stage 14: risk-sized execution -----------------------------------------
+def test_pipeline_risk_sizes_intents_from_weights_not_flat_notional():
+    from crypto_signal_bot.platform.risk.manager import RiskConfig, RiskManager
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    rm = RiskManager(RiskConfig(max_position_pct=1.0, max_gross=10.0, min_notional=0.0))
+    pipe = DailyPipeline(
+        _FakeSnapshotProvider(_snapshot(asof)),
+        signal_names=["alx"],
+        execution_engine=ExecutionEngine(InMemoryBroker(value=100.0)),
+        shadow_runner=ShadowRunner(),
+        portfolio_config=PortfolioConfig(k_pct=0.30, gross_target=1.0),
+        risk_manager=rm, nav=10_000.0, execute=False, lookback_days=10,
+    )
+    result = pipe.run_once(asof)
+    # sized by weight*gross*NAV, not the flat $1 default
+    assert result.intents
+    for i in result.intents:
+        w = abs(result.book.weights[i.symbol])
+        assert np.isclose(i.target_notional, w * 10_000.0)
+        assert i.target_notional != 1.0
+
+
+def test_reconciliation_matches_risk_adjusted_intents():
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
+    from crypto_signal_bot.platform.risk.manager import RiskConfig, RiskManager
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.PAPER)
+    rm = RiskManager(RiskConfig(max_position_pct=1.0, max_gross=10.0, min_notional=1.0))
+    result = _bybit_pipeline(_snapshot(asof), cfg, session=_FakeBybitSession(),
+                             use_brackets=True, risk_manager=rm, nav=10_000.0).run_once(asof)
+    # risk-scaled bracket entries opened; reconciliation agrees with the sized intents
+    assert result.execution.n_filled > 0
+    assert result.reconciliation is not None and result.reconciliation.ok
+
+
+def test_build_default_pipeline_wires_a_risk_manager():
+    from crypto_signal_bot.platform.pipeline import build_default_pipeline
+    from crypto_signal_bot.platform.risk.manager import RiskManager
+
+    pipe = build_default_pipeline()
+    assert isinstance(pipe.risk_manager, RiskManager) and pipe.nav > 0
+
+
+# --- Stage 14.1: NAV source = real broker equity (fallback only offline) -----
+class _FakeLiveSession(_FakeBybitSession):
+    """PAPER mock + wallet/positions so LIVE get_portfolio_state can report NAV."""
+
+    def __init__(self, total_equity: float):
+        self.total_equity = total_equity
+
+    def get_wallet_balance(self, **kw):
+        return {"result": {"list": [{"totalEquity": str(self.total_equity)}]}}
+
+    def get_positions(self, **kw):
+        return {"result": {"list": []}}
+
+
+def _risk_pipe(broker, nav):
+    from crypto_signal_bot.platform.risk.manager import RiskManager
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    return DailyPipeline(
+        _FakeSnapshotProvider(_snapshot(asof)),
+        signal_names=["alx"],
+        execution_engine=ExecutionEngine(broker),
+        shadow_runner=ShadowRunner(),
+        risk_manager=RiskManager(),
+        nav=nav,
+        lookback_days=10,
+    )
+
+
+def test_resolve_nav_uses_paper_broker_equity_not_pipeline_nav():
+    from crypto_signal_bot.platform.execution.bybit_broker import BybitBroker
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
+
+    cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.PAPER, paper_equity=5_000.0)
+    broker = BybitBroker(cfg, session=_FakeBybitSession())
+    pipe = _risk_pipe(broker, nav=10_000.0)  # pipeline nav deliberately different
+    assert np.isclose(pipe._resolve_nav(), 5_000.0)
+
+
+def test_resolve_nav_uses_live_broker_equity():
+    from crypto_signal_bot.platform.execution.bybit_broker import BybitBroker
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
+
+    cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.LIVE)
+    broker = BybitBroker(cfg, session=_FakeLiveSession(7_777.0))
+    pipe = _risk_pipe(broker, nav=10_000.0)
+    assert np.isclose(pipe._resolve_nav(), 7_777.0)
+
+
+def test_resolve_nav_falls_back_to_pipeline_nav_for_inmemory():
+    pipe = _risk_pipe(InMemoryBroker(value=1.0), nav=10_000.0)
+    # InMemory equity (1.0) is offline bookkeeping, not a real account -> fallback
+    assert np.isclose(pipe._resolve_nav(), 10_000.0)
+
+
+def test_paper_sizing_uses_broker_equity_and_reconciliation_still_passes():
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
+    from crypto_signal_bot.platform.risk.manager import RiskConfig, RiskManager
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.PAPER, paper_equity=5_000.0)
+    rm = RiskManager(RiskConfig(max_position_pct=1.0, max_gross=10.0, min_notional=1.0))
+    result = _bybit_pipeline(_snapshot(asof), cfg, session=_FakeBybitSession(),
+                             use_brackets=True, risk_manager=rm, nav=10_000.0).run_once(asof)
+    # Every sized intent is scaled against broker equity 5000, NOT pipeline nav 10000.
+    assert result.intents
+    for i in result.intents:
+        w = abs(result.book.weights[i.symbol])
+        assert np.isclose(i.target_notional, w * 5_000.0)
+    # Sizing and reconciliation now share one NAV, so reconciliation stays clean.
+    assert result.reconciliation is not None and result.reconciliation.ok
+
+
+def test_build_default_pipeline_has_single_nav_source_of_truth():
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
+    from crypto_signal_bot.platform.pipeline import build_default_pipeline
+
+    # Offline default: no real broker -> pipeline nav is the fallback source.
+    offline = build_default_pipeline(nav=12_345.0)
+    assert np.isclose(offline._resolve_nav(), 12_345.0)
+
+    # PAPER: the broker's equity is the source; pipeline nav is ignored (no dual truth).
+    paper = build_default_pipeline(
+        nav=12_345.0,
+        bybit_config=BybitConfig(api_key="k", api_secret="s",
+                                 mode=TradingMode.PAPER, paper_equity=5_000.0),
+        bybit_session=_FakeBybitSession())
+    assert np.isclose(paper._resolve_nav(), 5_000.0)

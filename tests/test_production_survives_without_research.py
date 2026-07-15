@@ -68,6 +68,7 @@ PRODUCTION_MODULES = [
     "crypto_signal_bot.platform.execution.bybit_config",
     "crypto_signal_bot.platform.execution.bybit_broker",
     "crypto_signal_bot.platform.execution.reconciler",
+    "crypto_signal_bot.platform.risk.manager",
     "crypto_signal_bot.platform.data.static_universe",
     "crypto_signal_bot.app.trade_runner",
     "crypto_signal_bot.platform.execution.intent",

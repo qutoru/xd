@@ -19,6 +19,8 @@ from loguru import logger
 from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
 from crypto_signal_bot.platform.notify.notifier import TelegramNotifier
 from crypto_signal_bot.platform.pipeline import DailyPipeline, PipelineResult, build_default_pipeline
+from crypto_signal_bot.platform.risk_control.control import RiskControlConfig
+from crypto_signal_bot.platform.risk_control.state import RiskStateStore
 
 
 def parse_symbols(raw: str | None) -> list[str]:
@@ -55,13 +57,20 @@ def build_trade_pipeline(
     notifier: TelegramNotifier | None,
     session=None,
 ) -> DailyPipeline:
-    """Build the one existing pipeline for the configured mode."""
+    """Build the one existing pipeline for the configured mode.
+
+    Risk-control limits come from ``RISK_*`` env vars (RiskControlConfig.from_env);
+    the emergency-stop latch and daily-loss baseline persist to ``RISK_STATE_PATH``
+    so they survive the one-shot process.
+    """
     return build_default_pipeline(
         signal_names=tuple(signals),
         bybit_config=cfg,
         bybit_session=session,
         notifier=notifier,
         symbols=list(symbols) or None,
+        risk_control_config=RiskControlConfig.from_env(),
+        risk_state=RiskStateStore(os.getenv("RISK_STATE_PATH", "data/risk_state.json")),
     )
 
 

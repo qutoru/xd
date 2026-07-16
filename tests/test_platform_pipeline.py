@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 
 from crypto_signal_bot.platform.data.snapshot import MarketSnapshot
+from crypto_signal_bot.platform.execution.broker import Broker
+from crypto_signal_bot.platform.execution.domain import OrderResult, OrderStatus, PortfolioState
 from crypto_signal_bot.platform.execution.engine import ExecutionEngine
 from crypto_signal_bot.platform.execution.fake_broker import InMemoryBroker
 from crypto_signal_bot.platform.pipeline import DailyPipeline, PipelineResult
@@ -125,7 +127,8 @@ class _FakeBybitSession:
 
 
 def _bybit_pipeline(snap, config, session=None, notifier=None, use_brackets=False,
-                    intent_params=None, risk_manager=None, nav=10_000.0):
+                    intent_params=None, risk_manager=None, nav=10_000.0,
+                    risk_control=None):
     from crypto_signal_bot.platform.execution.bybit_broker import build_broker
     from crypto_signal_bot.platform.execution.reconciler import Reconciler
 
@@ -140,6 +143,7 @@ def _bybit_pipeline(snap, config, session=None, notifier=None, use_brackets=Fals
         notifier=notifier,
         reconciler=Reconciler() if broker is not None else None,
         risk_manager=risk_manager,
+        risk_control=risk_control,
         nav=nav,
         use_brackets=use_brackets,
         execute=config.needs_exchange,
@@ -469,3 +473,170 @@ def test_build_default_pipeline_has_single_nav_source_of_truth():
                                  mode=TradingMode.PAPER, paper_equity=5_000.0),
         bybit_session=_FakeBybitSession())
     assert np.isclose(paper._resolve_nav(), 5_000.0)
+
+
+# --- Stage 15: Production Risk Control gate (pipeline integration) ------------
+def _rc_paper_pipeline(asof, risk_control, *, min_notional=1.0):
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
+    from crypto_signal_bot.platform.risk.manager import RiskConfig, RiskManager
+
+    cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.PAPER)
+    rm = RiskManager(RiskConfig(max_position_pct=1.0, max_gross=10.0, min_notional=min_notional))
+    return _bybit_pipeline(_snapshot(asof), cfg, session=_FakeBybitSession(),
+                           use_brackets=True, risk_manager=rm, nav=10_000.0,
+                           risk_control=risk_control)
+
+
+def test_pipeline_kill_switch_halts_new_entries():
+    from crypto_signal_bot.platform.risk_control.control import (
+        BlockReason, ProductionRiskControl, RiskControlConfig,
+    )
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    rc = ProductionRiskControl(RiskControlConfig(kill_switch=True))
+    result = _rc_paper_pipeline(asof, rc).run_once(asof)
+    # Intents are still produced (for shadow/notify) but nothing is executed.
+    assert result.intents
+    assert result.risk_control is not None and result.risk_control.halted
+    assert result.risk_control.halt_reason is BlockReason.KILL_SWITCH
+    assert result.execution is None  # halt opens nothing this cycle
+
+
+def test_pipeline_halt_keeps_existing_positions_open():
+    from crypto_signal_bot.platform.risk_control.control import ProductionRiskControl, RiskControlConfig
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    rc = ProductionRiskControl(RiskControlConfig())  # starts as a no-op gate
+    pipe = _rc_paper_pipeline(asof, rc)
+
+    r1 = pipe.run_once(asof)  # opens positions on the PAPER broker
+    assert r1.execution is not None and r1.execution.n_filled > 0
+    held_before = set(pipe.execution_engine.broker.get_portfolio_state().positions)
+    assert held_before
+
+    rc.trip_emergency_stop()  # emergency: block new entries from now on
+    r2 = pipe.run_once(asof + pd.Timedelta(days=1))
+    assert r2.risk_control.halted
+    assert r2.execution is None  # no new orders sent
+    held_after = set(pipe.execution_engine.broker.get_portfolio_state().positions)
+    assert held_after == held_before  # existing positions untouched (not closed)
+
+
+def test_pipeline_execution_failure_trips_emergency_stop():
+    from crypto_signal_bot.platform.risk.manager import RiskConfig, RiskManager
+    from crypto_signal_bot.platform.risk_control.control import BlockReason, ProductionRiskControl
+
+    class _BoomBroker(InMemoryBroker):
+        def submit(self, request):
+            raise RuntimeError("venue down")
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    rc = ProductionRiskControl()
+    rm = RiskManager(RiskConfig(max_position_pct=1.0, max_gross=10.0, min_notional=0.0))
+    pipe = DailyPipeline(
+        _FakeSnapshotProvider(_snapshot(asof)),
+        signal_names=["alx"],
+        execution_engine=ExecutionEngine(_BoomBroker(value=100.0)),
+        shadow_runner=ShadowRunner(),
+        portfolio_config=PortfolioConfig(k_pct=0.30, gross_target=1.0),
+        risk_manager=rm, risk_control=rc, nav=10_000.0, lookback_days=10,
+    )
+    r1 = pipe.run_once(asof)  # execution raises -> caught -> emergency latched
+    assert rc.emergency_stopped
+    assert r1.reconciliation is not None  # errored path still returns a report? (no reconciler here)
+
+    r2 = pipe.run_once(asof + pd.Timedelta(days=1))  # subsequent cycle is halted
+    assert r2.risk_control.halted and r2.risk_control.halt_reason is BlockReason.EMERGENCY_STOP
+    assert r2.execution is None
+
+
+def test_pipeline_max_position_size_blocks_orders_from_reaching_broker():
+    from crypto_signal_bot.platform.risk_control.control import (
+        BlockReason, ProductionRiskControl, RiskControlConfig,
+    )
+
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    # An absurdly tight per-order cap: every sized intent must be blocked even
+    # though RiskManager produced them -> nothing reaches the broker.
+    rc = ProductionRiskControl(RiskControlConfig(max_position_size=1e-9))
+    result = _rc_paper_pipeline(asof, rc).run_once(asof)
+    assert result.intents
+    assert result.risk_control.n_blocked == len(result.intents)
+    assert all(r is BlockReason.MAX_POSITION_SIZE for _, r in result.risk_control.blocked)
+    assert result.execution is not None and result.execution.n_filled == 0  # no fills
+
+
+# --- Stage 15.1: persisted stateful controls (survive process restart) -------
+class _NavBroker(Broker):
+    """A non-InMemory broker with a settable NAV (so _resolve_nav reads it)."""
+
+    def __init__(self, value: float):
+        self.value = value
+
+    def submit(self, request):
+        return OrderResult(request=request, status=OrderStatus.FILLED,
+                           filled_quantity=request.quantity, fills=[], message="ok")
+
+    def get_portfolio_state(self):
+        return PortfolioState(value=self.value, positions={})
+
+
+def _persist_pipeline(asof, broker, store, risk_control, *, execute=False, risk_manager=None):
+    return DailyPipeline(
+        _FakeSnapshotProvider(_snapshot(asof)),
+        signal_names=["alx"],
+        execution_engine=ExecutionEngine(broker),
+        shadow_runner=ShadowRunner(),
+        portfolio_config=PortfolioConfig(k_pct=0.30, gross_target=1.0),
+        risk_manager=risk_manager,
+        risk_control=risk_control,
+        risk_state=store,
+        execute=execute,
+        lookback_days=10,
+    )
+
+
+def test_daily_loss_limit_persists_across_separate_runs(tmp_path):
+    from crypto_signal_bot.platform.risk_control.control import (
+        BlockReason, ProductionRiskControl, RiskControlConfig,
+    )
+    from crypto_signal_bot.platform.risk_control.state import RiskStateStore
+
+    store = RiskStateStore(tmp_path / "risk.json")
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    cfg = RiskControlConfig(daily_loss_limit=0.05)
+
+    # Run 1 (process 1): baseline NAV 10_000 persisted; no loss yet.
+    r1 = _persist_pipeline(asof, _NavBroker(10_000.0), store,
+                           ProductionRiskControl(cfg)).run_once(asof)
+    assert not r1.risk_control.halted
+
+    # Run 2 (fresh pipeline = new process), same day, NAV dropped to 9_000 -> 10% loss.
+    r2 = _persist_pipeline(asof, _NavBroker(9_000.0), store,
+                           ProductionRiskControl(cfg)).run_once(asof)
+    assert r2.risk_control.halted
+    assert r2.risk_control.halt_reason is BlockReason.DAILY_LOSS_LIMIT
+
+
+def test_emergency_stop_persists_across_separate_runs(tmp_path):
+    from crypto_signal_bot.platform.risk.manager import RiskConfig, RiskManager
+    from crypto_signal_bot.platform.risk_control.control import BlockReason, ProductionRiskControl
+    from crypto_signal_bot.platform.risk_control.state import RiskStateStore
+
+    class _BoomBroker(_NavBroker):
+        def submit(self, request):
+            raise RuntimeError("venue down")
+
+    store = RiskStateStore(tmp_path / "risk.json")
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    rm = RiskManager(RiskConfig(max_position_pct=1.0, max_gross=10.0, min_notional=0.0))
+
+    # Process 1: execution raises -> emergency latched AND persisted.
+    _persist_pipeline(asof, _BoomBroker(10_000.0), store, ProductionRiskControl(),
+                      execute=True, risk_manager=rm).run_once(asof)
+    assert store.load().emergency_stopped is True
+
+    # Process 2: fresh pipeline + fresh ProductionRiskControl -> loads the latch.
+    r2 = _persist_pipeline(asof, _NavBroker(10_000.0), store,
+                           ProductionRiskControl()).run_once(asof)
+    assert r2.risk_control.halted and r2.risk_control.halt_reason is BlockReason.EMERGENCY_STOP

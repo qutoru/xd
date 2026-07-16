@@ -70,3 +70,35 @@ def test_run_trade_aborts_on_preflight_connection_failure(monkeypatch):
     rc = run_trade(signals=["alx"], asof=pd.Timestamp("2024-01-02", tz="UTC"),
                    session=_DeadSession())
     assert rc == 1  # aborted at pre-flight, before the trading cycle
+
+
+# --- P1: production entrypoint configures RiskControl from env ---------------
+def _clear_risk_env(monkeypatch):
+    for k in ("RISK_KILL_SWITCH", "RISK_DAILY_LOSS_LIMIT", "RISK_MAX_OPEN_POSITIONS",
+              "RISK_MAX_EXPOSURE", "RISK_MAX_POSITION_SIZE", "RISK_STATE_PATH"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_build_trade_pipeline_paper_gets_env_risk_config_and_persistence(monkeypatch):
+    from crypto_signal_bot.app.trade_runner import build_trade_pipeline
+
+    _env(monkeypatch)
+    _clear_risk_env(monkeypatch)
+    monkeypatch.setenv("RISK_KILL_SWITCH", "true")
+    monkeypatch.setenv("RISK_MAX_EXPOSURE", "0.5")
+    cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.PAPER)
+    pipe = build_trade_pipeline(cfg, signals=["alx"], symbols=["BTCUSDT"], notifier=None)
+    assert pipe.risk_control.config.kill_switch is True          # not the default no-op
+    assert pipe.risk_control.config.max_exposure == 0.5
+    assert pipe.risk_state is not None                            # persistence wired
+
+
+def test_build_trade_pipeline_live_gets_env_risk_config(monkeypatch):
+    from crypto_signal_bot.app.trade_runner import build_trade_pipeline
+
+    _env(monkeypatch)
+    _clear_risk_env(monkeypatch)
+    monkeypatch.setenv("RISK_MAX_POSITION_SIZE", "0.1")
+    cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.LIVE)
+    pipe = build_trade_pipeline(cfg, signals=["alx"], symbols=["BTCUSDT"], notifier=None)
+    assert pipe.risk_control.config.max_position_size == 0.1

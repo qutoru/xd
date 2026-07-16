@@ -28,6 +28,11 @@ from crypto_signal_bot.platform.notify.notifier import NotifyResult, TelegramNot
 from crypto_signal_bot.platform.portfolio.book import TargetBook
 from crypto_signal_bot.platform.portfolio.builder import PortfolioConfig, build_target_book
 from crypto_signal_bot.platform.risk.manager import RiskManager
+from crypto_signal_bot.platform.risk_control.control import (
+    ProductionRiskControl,
+    RiskControlDecision,
+)
+from crypto_signal_bot.platform.risk_control.state import RiskStateStore
 from crypto_signal_bot.platform.shadow.report import ShadowReport
 from crypto_signal_bot.platform.shadow.runner import ShadowRunner
 from crypto_signal_bot.platform.signals.registry import load_signal
@@ -44,6 +49,7 @@ class PipelineResult:
     intents: list[TradeIntent]
     notify: NotifyResult | None = None
     reconciliation: ReconciliationReport | None = None
+    risk_control: RiskControlDecision | None = None
 
 
 def _bracket_expected_weights(intents: list[TradeIntent], nav: float) -> pd.Series:
@@ -92,6 +98,8 @@ class DailyPipeline:
         notifier: TelegramNotifier | None = None,
         reconciler: Reconciler | None = None,
         risk_manager: RiskManager | None = None,
+        risk_control: ProductionRiskControl | None = None,
+        risk_state: RiskStateStore | None = None,
         nav: float = 10_000.0,
         use_brackets: bool = False,
         lookback_days: int = 90,
@@ -113,6 +121,16 @@ class DailyPipeline:
         # the true equity from ``broker.get_portfolio_state().value`` instead (see
         # ``_resolve_nav``), so risk sizing and reconciliation share one NAV.
         self.risk_manager = risk_manager
+        # Stage 15 — Production Risk Control: the final gate on *new* entries, run
+        # after sizing and before execution. When None the pipeline behaves exactly
+        # as before (no gate). ``_risk_nav_anchor`` holds (date, NAV) at the start
+        # of the trading day for the daily-loss check.
+        self.risk_control = risk_control
+        # Optional file-backed persistence so the emergency-stop latch and the
+        # daily-loss day-start NAV survive process restarts (run_trade is one-shot).
+        # When None, the controls keep their in-memory-only behaviour.
+        self.risk_state = risk_state
+        self._risk_nav_anchor: tuple | None = None
         self.nav = nav
         # When True, open positions via the entry + reduce-only TP/SL bracket
         # (execute_bracket_intents); when False, use the legacy weight-rebalance
@@ -141,6 +159,94 @@ class DailyPipeline:
             logger.warning("Broker NAV read failed; using fallback nav {}: {}", self.nav, exc)
             return self.nav
 
+    def _current_positions_notional(self) -> pd.Series:
+        """Signed notional per currently-held symbol (empty if unavailable).
+
+        Read-only view of the broker's pre-trade state for the risk-control gate.
+        A broker/API failure must never abort the run, so it degrades to empty
+        (the gate then sees no held positions, i.e. treats all entries as new).
+        """
+        broker = getattr(self.execution_engine, "broker", None)
+        if broker is None:
+            return pd.Series(dtype="float64")
+        try:
+            state = broker.get_portfolio_state()
+        except Exception as exc:  # network/credential failure -> empty, never abort
+            logger.warning("Position read failed for risk control; assuming flat: {}", exc)
+            return pd.Series(dtype="float64")
+        return pd.Series(
+            {s: p.quantity for s, p in state.positions.items()}, dtype="float64"
+        )
+
+    def _risk_day_anchor(self, asof: pd.Timestamp, nav: float, state=None) -> float:
+        """NAV at the start of ``asof``'s day — the baseline for the daily-loss halt.
+
+        With a RiskStateStore the baseline is persisted, so a later run on the same
+        day (even in a new process) measures the loss against the *first* run's NAV
+        rather than against itself.
+        """
+        date = pd.Timestamp(asof).date()
+        if self.risk_state is not None and state is not None:
+            iso = date.isoformat()
+            if state.day == iso and state.day_start_nav is not None:
+                return float(state.day_start_nav)
+            state.day = iso
+            state.day_start_nav = nav
+            self.risk_state.save(state)
+            return nav
+        # in-memory fallback (unchanged when no store is wired)
+        if self._risk_nav_anchor is None or self._risk_nav_anchor[0] != date:
+            self._risk_nav_anchor = (date, nav)
+        return self._risk_nav_anchor[1]
+
+    def _persist_emergency_stop(self) -> None:
+        """Latch the emergency stop on disk so it survives a process restart."""
+        if self.risk_state is None:
+            return
+        state = self.risk_state.load()
+        state.emergency_stopped = True
+        self.risk_state.save(state)
+
+    def _apply_production_risk_control(
+        self, intents: list[TradeIntent], asof: pd.Timestamp
+    ) -> tuple[RiskControlDecision, list[TradeIntent]]:
+        """Gate new-entry intents; return (decision, intents that may execute).
+
+        Only the executed intents are filtered — shadow, notify and the result keep
+        the full intent list. Blocked/halted means fewer (or no) new entries; open
+        positions are never closed here.
+        """
+        nav = self._resolve_nav()
+        positions = self._current_positions_notional()
+        # Persisted state (when a store is wired) carries the emergency latch and
+        # the daily-loss baseline across separate program runs.
+        state = self.risk_state.load() if self.risk_state is not None else None
+        if state is not None and state.emergency_stopped:
+            self.risk_control.trip_emergency_stop()
+        proposed = pd.Series(
+            {
+                i.symbol: (i.target_notional if i.side is Side.BUY else -i.target_notional)
+                for i in intents
+            },
+            dtype="float64",
+        )
+        decision = self.risk_control.evaluate(
+            proposed, positions, nav, day_start_nav=self._risk_day_anchor(asof, nav, state)
+        )
+        if decision.halted:
+            logger.warning(
+                "Production risk control HALTED new entries: {}",
+                decision.halt_reason.value if decision.halt_reason else "unknown",
+            )
+        elif decision.blocked:
+            logger.warning(
+                "Production risk control blocked {} new entry(ies): {}",
+                decision.n_blocked, [(s, r.value) for s, r in decision.blocked],
+            )
+        allowed = set(decision.allowed)
+        exec_intents = [i for i in intents if i.symbol in allowed]
+        return decision, exec_intents
+
     def run_once(self, asof: pd.Timestamp) -> PipelineResult:
         snapshot = self.snapshot_provider.snapshot(asof, self.lookback_days)
 
@@ -167,18 +273,29 @@ class DailyPipeline:
             params=self.intent_params, notionals=notionals,
         )
 
+        # Stage 15 — Production Risk Control: the final gate on *new* entries, after
+        # sizing and before execution. It filters the intents that reach the broker
+        # (exec_intents); shadow/notify/result keep the full intent list. A global
+        # halt (kill switch / daily-loss / emergency) opens nothing this cycle and
+        # never closes existing positions.
+        rc_decision: RiskControlDecision | None = None
+        exec_intents = intents
+        if self.risk_control is not None:
+            rc_decision, exec_intents = self._apply_production_risk_control(intents, asof)
+        halted = rc_decision is not None and rc_decision.halted
+
         # Trade + reconcile. A broker/API failure must never abort the run: it is
         # logged and surfaced as a failed reconciliation, and the cycle continues.
         exec_report = None
         reconciliation = None
-        if self.execute:
+        if self.execute and not halted:
             try:
                 if self.use_brackets:
                     # Open the position AND place its reduce-only TP/SL in one existing
                     # call (entry + reduce-only LIMIT TP + reduce-only STOP SL). Same-day
                     # re-runs are idempotent via the date-stamped orderLinkId.
-                    exec_report = self.execution_engine.execute_bracket_intents(intents)
-                    expected = _bracket_expected_weights(intents, exec_report.resulting_state.value)
+                    exec_report = self.execution_engine.execute_bracket_intents(exec_intents)
+                    expected = _bracket_expected_weights(exec_intents, exec_report.resulting_state.value)
                 else:
                     # Legacy weight-rebalance. NOTE: this path sizes orders from
                     # book.weights x broker equity and does NOT consume the risk
@@ -198,6 +315,13 @@ class DailyPipeline:
                     )
             except Exception as exc:
                 logger.warning("Execution/reconciliation failed, continuing: {}", exc)
+                # A critical execution failure trips the emergency stop: subsequent
+                # cycles open no new positions until it is explicitly reset. The app
+                # keeps running; only new entries are refused. Persisted so it also
+                # survives a process restart.
+                if self.risk_control is not None:
+                    self.risk_control.trip_emergency_stop()
+                    self._persist_emergency_stop()
                 reconciliation = ReconciliationReport.errored(book.asof, str(exc))
 
         shadow_report = self.shadow_runner.step(book, snapshot, intents=intents)
@@ -216,6 +340,7 @@ class DailyPipeline:
             intents=intents,
             notify=notify_result,
             reconciliation=reconciliation,
+            risk_control=rc_decision,
         )
 
 
@@ -231,6 +356,8 @@ def build_default_pipeline(
     bybit_session=None,
     symbols: Sequence[str] | None = None,
     risk_config=None,
+    risk_control_config=None,
+    risk_state: RiskStateStore | None = None,
     nav: float = 10_000.0,
     lookback_days: int = 90,
 ) -> DailyPipeline:
@@ -284,9 +411,16 @@ def build_default_pipeline(
             use_brackets = True
 
     from crypto_signal_bot.platform.risk.manager import RiskConfig
+    from crypto_signal_bot.platform.risk_control.control import (
+        ProductionRiskControl,
+        RiskControlConfig,
+    )
 
     engine = ExecutionEngine(broker or InMemoryBroker(value=1.0))
     runner = ShadowRunner(shadow_params or ShadowParams())
+    # Production Risk Control is always present so the emergency stop exists; the
+    # default (no-limit) config is a no-op gate, tuned via ``risk_control_config``.
+    risk_control = ProductionRiskControl(risk_control_config or RiskControlConfig())
     return DailyPipeline(
         snapshot_provider,
         signal_names=signal_names,
@@ -297,6 +431,8 @@ def build_default_pipeline(
         notifier=notifier,
         reconciler=reconciler,
         risk_manager=RiskManager(risk_config or RiskConfig()),
+        risk_control=risk_control,
+        risk_state=risk_state,
         nav=nav,
         use_brackets=use_brackets,
         execute=execute,

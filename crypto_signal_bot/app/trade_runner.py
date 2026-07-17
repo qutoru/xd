@@ -11,6 +11,7 @@ BybitBroker.
 from __future__ import annotations
 
 import os
+import time
 from typing import Sequence
 
 import pandas as pd
@@ -18,6 +19,7 @@ from loguru import logger
 
 from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
 from crypto_signal_bot.platform.notify.notifier import TelegramNotifier
+from crypto_signal_bot.platform.observability.summary import CycleSummary
 from crypto_signal_bot.platform.pipeline import DailyPipeline, PipelineResult, build_default_pipeline
 from crypto_signal_bot.platform.risk_control.control import RiskControlConfig
 from crypto_signal_bot.platform.risk_control.state import RiskStateStore
@@ -74,7 +76,7 @@ def build_trade_pipeline(
     )
 
 
-def _log_result(cfg: BybitConfig, result: PipelineResult) -> None:
+def _log_result(cfg: BybitConfig, result: PipelineResult, duration_s: float | None = None) -> None:
     logger.success(
         "{} {} — gross={:.2f} net={:+.4f} daily_pnl={:+.5f}",
         cfg.mode.value.upper(), result.asof.date(),
@@ -96,6 +98,10 @@ def _log_result(cfg: BybitConfig, result: PipelineResult) -> None:
     if result.notify is not None:
         logger.info("Telegram — sent={} failed={} skipped={}",
                     result.notify.sent, result.notify.failed, result.notify.skipped)
+    # Additional structured cycle summary (observability only; existing lines above
+    # are unchanged). Read-only projection over the result — computes nothing.
+    for line in CycleSummary.from_result(result, duration_s=duration_s).format_lines():
+        logger.info(line)
 
 
 def run_trade(
@@ -127,6 +133,7 @@ def run_trade(
             return 1
         logger.success("Pre-flight OK — connected to Bybit (testnet={})", cfg.testnet)
 
+    t0 = time.perf_counter()
     result = pipeline.run_once(asof if asof is not None else pd.Timestamp.now(tz="UTC").normalize())
-    _log_result(cfg, result)
+    _log_result(cfg, result, duration_s=time.perf_counter() - t0)
     return 0

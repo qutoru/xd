@@ -18,6 +18,8 @@ import pandas as pd
 
 from loguru import logger
 
+from crypto_signal_bot.platform.accounting.ledger import AccountingStore
+from crypto_signal_bot.platform.accounting.report import PerformanceReport
 from crypto_signal_bot.platform.execution.engine import ExecutionEngine
 from crypto_signal_bot.platform.execution.domain import ExecutionReport, OrderStatus, Side
 from crypto_signal_bot.platform.execution.fake_broker import InMemoryBroker
@@ -50,6 +52,7 @@ class PipelineResult:
     notify: NotifyResult | None = None
     reconciliation: ReconciliationReport | None = None
     risk_control: RiskControlDecision | None = None
+    performance: PerformanceReport | None = None
 
 
 def _bracket_expected_weights(intents: list[TradeIntent], nav: float) -> pd.Series:
@@ -104,6 +107,7 @@ class DailyPipeline:
         use_brackets: bool = False,
         lookback_days: int = 90,
         execute: bool = True,
+        accounting_store: AccountingStore | None = None,
     ) -> None:
         self.snapshot_provider = snapshot_provider
         self.signal_names = list(signal_names)
@@ -138,6 +142,12 @@ class DailyPipeline:
         self.use_brackets = use_brackets
         self.lookback_days = lookback_days
         self.execute = execute
+        # Optional realized-PnL accounting: when a store is injected, each cycle
+        # books the broker's fills into a persisted ledger (loaded once here, kept
+        # in memory, saved on change). When None, the pipeline behaves exactly as
+        # before — no ledger, no extra broker call.
+        self._accounting_store = accounting_store
+        self._ledger = accounting_store.load() if accounting_store is not None else None
         self._prev_book: TargetBook | None = None
 
     def _resolve_nav(self) -> float:
@@ -335,6 +345,14 @@ class DailyPipeline:
                     self._persist_emergency_stop()
                 reconciliation = ReconciliationReport.errored(book.asof, str(exc))
 
+        # Book realized PnL from the venue's fills (runs every cycle, independent of
+        # halt/execute: TP/SL that fired between cycles must still be recorded).
+        self._update_accounting()
+        # Project the (cumulative) ledger into a report; None when accounting is off.
+        performance = (
+            None if self._ledger is None else PerformanceReport.from_ledger(self._ledger)
+        )
+
         shadow_report = self.shadow_runner.step(book, snapshot, intents=intents)
 
         # Notify only after reconciliation, so alerts reflect the synchronized state.
@@ -352,7 +370,30 @@ class DailyPipeline:
             notify=notify_result,
             reconciliation=reconciliation,
             risk_control=rc_decision,
+            performance=performance,
         )
+
+    def _update_accounting(self) -> None:
+        """Poll the broker's fills since the ledger watermark and persist realized PnL.
+
+        No-op unless an :class:`AccountingStore` was injected. ``get_fills`` defaults
+        to empty for brokers with no execution feed, so the ledger and file are left
+        untouched then. De-dup by ``exec_id`` makes the inclusive ``since`` watermark
+        safe against re-fetching boundary fills. Accounting is observational — a
+        failure here is logged and swallowed, never aborting the trading cycle.
+        """
+        if self._ledger is None or self._accounting_store is None:
+            return
+        broker = getattr(self.execution_engine, "broker", None)
+        if broker is None:
+            return
+        try:
+            fills = broker.get_fills(since=self._ledger.watermark())
+            added = self._ledger.record(fills)
+            if added:
+                self._accounting_store.save(self._ledger)
+        except Exception as exc:  # accounting must never break the trading cycle
+            logger.warning("Accounting update failed, continuing: {}", exc)
 
 
 def build_default_pipeline(

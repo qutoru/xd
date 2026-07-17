@@ -1,4 +1,4 @@
-"""Integration pipeline — wires Stage 1-5 layers into one daily lifecycle.
+"""Integration pipeline — wires the platform layers into one daily lifecycle.
 
     MarketSnapshot -> SignalProvider(s) -> PortfolioBuilder -> TargetBook
         -> ExecutionEngine -> Broker -> ShadowRunner
@@ -136,9 +136,9 @@ class DailyPipeline:
         self.risk_state = risk_state
         self._risk_nav_anchor: tuple | None = None
         self.nav = nav
-        # When True, open positions via the entry + reduce-only TP/SL bracket
-        # (execute_bracket_intents); when False, use the legacy weight-rebalance
-        # (execute(book)). A plain flag — the pipeline stays venue-agnostic.
+        # When True, rebalance to the target position via the reduce-only TP/SL
+        # bracket path (rebalance_bracket_intents); when False, use the legacy
+        # weight-rebalance (execute(book)). A plain flag — pipeline stays venue-agnostic.
         self.use_brackets = use_brackets
         self.lookback_days = lookback_days
         self.execute = execute

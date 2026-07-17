@@ -14,8 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-import pandas as pd
-
 from crypto_signal_bot.platform.portfolio import (
     allocator,
     combiner,

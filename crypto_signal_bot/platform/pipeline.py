@@ -127,7 +127,7 @@ class DailyPipeline:
         self.risk_manager = risk_manager
         # Stage 15 — Production Risk Control: the final gate on *new* entries, run
         # after sizing and before execution. When None the pipeline behaves exactly
-        # as before (no gate). ``_risk_nav_anchor`` holds (date, NAV) at the start
+        # as before (no gate). ``_risk_nav_anchor`` holds (date, NAV, realized) at start
         # of the trading day for the daily-loss check.
         self.risk_control = risk_control
         # Optional file-backed persistence so the emergency-stop latch and the
@@ -188,26 +188,32 @@ class DailyPipeline:
             {s: p.quantity for s, p in state.positions.items()}, dtype="float64"
         )
 
-    def _risk_day_anchor(self, asof: pd.Timestamp, nav: float, state=None) -> float:
-        """NAV at the start of ``asof``'s day — the baseline for the daily-loss halt.
+    def _risk_day_anchor(
+        self, asof: pd.Timestamp, nav: float, realized_now: float, state=None
+    ) -> tuple[float, float]:
+        """(NAV, cumulative-realized-PnL) at the start of ``asof``'s day.
 
-        With a RiskStateStore the baseline is persisted, so a later run on the same
-        day (even in a new process) measures the loss against the *first* run's NAV
-        rather than against itself.
+        Both baselines are captured together at the first run of the day so the
+        daily-loss halt can measure either the NAV delta or today's realized PnL
+        against a consistent day boundary. With a RiskStateStore they are persisted,
+        so a later run on the same day (even a new process) measures against the
+        *first* run's baselines rather than against itself; otherwise an in-memory
+        anchor, unchanged when no store is wired.
         """
         date = pd.Timestamp(asof).date()
         if self.risk_state is not None and state is not None:
             iso = date.isoformat()
             if state.day == iso and state.day_start_nav is not None:
-                return float(state.day_start_nav)
+                return float(state.day_start_nav), float(state.day_start_realized_pnl or 0.0)
             state.day = iso
             state.day_start_nav = nav
+            state.day_start_realized_pnl = realized_now
             self.risk_state.save(state)
-            return nav
+            return nav, realized_now
         # in-memory fallback (unchanged when no store is wired)
         if self._risk_nav_anchor is None or self._risk_nav_anchor[0] != date:
-            self._risk_nav_anchor = (date, nav)
-        return self._risk_nav_anchor[1]
+            self._risk_nav_anchor = (date, nav, realized_now)
+        return self._risk_nav_anchor[1], self._risk_nav_anchor[2]
 
     def _persist_emergency_stop(self) -> None:
         """Latch the emergency stop on disk so it survives a process restart."""
@@ -240,8 +246,16 @@ class DailyPipeline:
             },
             dtype="float64",
         )
+        # Realized-PnL daily-loss input (Stage 18): cumulative realized now minus the
+        # cumulative at day start = PnL realized today. None when accounting is off,
+        # so the control transparently keeps its NAV-based daily-loss logic. The
+        # Ledger stays the single source of realized PnL; this is only a subtraction.
+        realized_now = self._ledger.realized_pnl if self._ledger is not None else 0.0
+        day_start_nav, day_start_realized = self._risk_day_anchor(asof, nav, realized_now, state)
+        realized_daily = None if self._ledger is None else realized_now - day_start_realized
         decision = self.risk_control.evaluate(
-            proposed, positions, nav, day_start_nav=self._risk_day_anchor(asof, nav, state)
+            proposed, positions, nav,
+            day_start_nav=day_start_nav, realized_daily_pnl=realized_daily,
         )
         if decision.halted:
             logger.warning(

@@ -44,6 +44,11 @@ class RiskControlConfig:
 
     kill_switch: bool = False               # block ALL new entries when True
     daily_loss_limit: float | None = None   # halt when day loss >= this fraction of day-start NAV
+    # When True (and a realized daily PnL is supplied), the daily-loss halt measures
+    # loss from *realized* PnL booked today instead of the NAV delta. Off by default
+    # and it falls back to the NAV delta whenever no realized value is provided, so
+    # existing behaviour is unchanged.
+    use_realized_daily_loss: bool = False
     max_open_positions: int | None = None   # cap on simultaneously open positions
     max_exposure: float | None = None       # cap on total gross exposure, as a fraction of NAV
     max_position_size: float | None = None  # cap per order, as a fraction of NAV
@@ -71,6 +76,7 @@ class RiskControlConfig:
         return cls(
             kill_switch=_b("RISK_KILL_SWITCH"),
             daily_loss_limit=_f("RISK_DAILY_LOSS_LIMIT"),
+            use_realized_daily_loss=_b("RISK_USE_REALIZED_DAILY_LOSS"),
             max_open_positions=_i("RISK_MAX_OPEN_POSITIONS"),
             max_exposure=_f("RISK_MAX_EXPOSURE"),
             max_position_size=_f("RISK_MAX_POSITION_SIZE"),
@@ -136,6 +142,7 @@ class ProductionRiskControl:
         nav: float = 0.0,
         *,
         day_start_nav: float | None = None,
+        realized_daily_pnl: float | None = None,
     ) -> RiskControlDecision:
         """Decide which proposed new entries may open.
 
@@ -143,6 +150,9 @@ class ProductionRiskControl:
         ``positions`` — signed notional per currently-held symbol.
         ``nav`` — current account equity; ``day_start_nav`` — equity at the start
         of the trading day, used only for the daily-loss halt.
+        ``realized_daily_pnl`` — PnL actually realized today (a plain number, from
+        the caller's accounting); consulted for the daily-loss halt only when
+        ``use_realized_daily_loss`` is set. The control never sees a ledger/broker.
 
         A global halt (kill switch / emergency stop / daily-loss) blocks every
         proposed entry. Otherwise each entry is checked against max_position_size,
@@ -154,7 +164,7 @@ class ProductionRiskControl:
         proposed = self._clean(proposed)
         symbols = list(proposed.index)
 
-        halt = self._halt_reason(nav, day_start_nav)
+        halt = self._halt_reason(nav, day_start_nav, realized_daily_pnl)
         if halt is not None:
             return RiskControlDecision(
                 allowed=(),
@@ -194,14 +204,23 @@ class ProductionRiskControl:
         return RiskControlDecision(allowed=tuple(allowed), blocked=tuple(blocked))
 
     # --- helpers ------------------------------------------------------------
-    def _halt_reason(self, nav: float, day_start_nav: float | None) -> BlockReason | None:
+    def _halt_reason(
+        self, nav: float, day_start_nav: float | None,
+        realized_daily_pnl: float | None = None,
+    ) -> BlockReason | None:
         cfg = self.config
         if cfg.kill_switch:
             return BlockReason.KILL_SWITCH
         if self._emergency_stopped:
             return BlockReason.EMERGENCY_STOP
         if cfg.daily_loss_limit is not None and day_start_nav is not None and day_start_nav > 0:
-            loss = day_start_nav - nav
+            # realized-PnL mode: today's loss is the negative of realized PnL booked
+            # today; otherwise the legacy NAV delta. Fall back to NAV when no realized
+            # value is supplied (accounting off) so behaviour is unchanged.
+            if cfg.use_realized_daily_loss and realized_daily_pnl is not None:
+                loss = -realized_daily_pnl
+            else:
+                loss = day_start_nav - nav
             if loss >= cfg.daily_loss_limit * day_start_nav - _TOL:
                 return BlockReason.DAILY_LOSS_LIMIT
         return None

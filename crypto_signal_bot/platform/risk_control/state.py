@@ -23,6 +23,7 @@ class RiskState:
     emergency_stopped: bool = False
     day: str | None = None            # ISO date the anchor belongs to
     day_start_nav: float | None = None  # NAV at the first run of that day
+    day_start_realized_pnl: float | None = None  # cumulative realized PnL at that first run
 
 
 class RiskStateStore:
@@ -41,6 +42,7 @@ class RiskStateStore:
             emergency_stopped=bool(data.get("emergency_stopped", False)),
             day=data.get("day"),
             day_start_nav=data.get("day_start_nav"),
+            day_start_realized_pnl=data.get("day_start_realized_pnl"),
         )
 
     def save(self, state: RiskState) -> None:
@@ -52,6 +54,7 @@ class RiskStateStore:
                     "emergency_stopped": state.emergency_stopped,
                     "day": state.day,
                     "day_start_nav": state.day_start_nav,
+                    "day_start_realized_pnl": state.day_start_realized_pnl,
                 }
             ),
             encoding="utf-8",

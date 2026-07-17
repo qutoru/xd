@@ -41,6 +41,7 @@ class FakeSession:
     def __init__(self, *, position_size=0.0, place_ret=0, raise_on_place=False):
         self.calls: list[tuple[str, dict]] = []
         self.orders: list[dict] = []
+        self.cancels: list[dict] = []
         self._position_size = position_size
         self._place_ret = place_ret
         self._raise_on_place = raise_on_place
@@ -79,6 +80,11 @@ class FakeSession:
     def get_wallet_balance(self, **kw):
         self.calls.append(("get_wallet_balance", kw))
         return {"result": {"list": [{"totalEquity": "10000"}]}}
+
+    def cancel_all_orders(self, **kw):
+        self.calls.append(("cancel_all_orders", kw))
+        self.cancels.append(kw)
+        return {"retCode": 0, "result": {"list": []}}
 
 
 def _cfg(mode=TradingMode.LIVE):
@@ -233,3 +239,62 @@ def test_engine_routes_bracket_through_live_broker():
     # three real orders placed; the two brackets are reduce-only
     assert len(s.orders) == 3
     assert [o["reduceOnly"] for o in s.orders] == [False, True, True]
+
+
+# --- C3: a signalled position-read error must NOT be read as a flat account -----
+class _PosErrSession(FakeSession):
+    """get_positions returns a non-zero retCode with an empty list (API error)."""
+
+    def get_positions(self, **kw):
+        self.calls.append(("get_positions", kw))
+        return {"retCode": 10001, "retMsg": "system busy", "result": {"list": []}}
+
+
+def test_live_positions_error_raises_instead_of_reporting_flat():
+    # Before the fix, a retCode!=0 empty response was silently treated as "no
+    # positions". Now the read fails loud so the caller cannot act on a false flat.
+    broker = BybitBroker(_cfg(), session=_PosErrSession())
+    with pytest.raises(RuntimeError, match="get_positions failed"):
+        broker.get_portfolio_state()
+
+
+def test_retcode_zero_empty_list_is_a_genuine_flat_account():
+    # A *successful* empty read (retCode 0 / absent) is still a real flat account.
+    broker = BybitBroker(_cfg(), session=FakeSession(position_size=0.0))
+    st = broker.get_portfolio_state()
+    assert st.positions == {}  # no exception, correctly flat
+
+
+def test_rebalance_does_not_reopen_when_position_read_errors():
+    # The delta-rebalance reads positions FIRST; on a signalled error it must raise
+    # (so run_once trips the emergency stop) rather than see a flat book and re-open
+    # the full target on top of the real position (the P0-A accumulation class).
+    s = _PosErrSession()
+    broker = BybitBroker(_cfg(), session=s)
+    intent = TradeIntent(symbol="BTCUSDT", side=Side.BUY, target_notional=1000.0,
+                         entry=100.0, strategy="platform", timestamp=TS)
+    with pytest.raises(RuntimeError, match="get_positions failed"):
+        ExecutionEngine(broker).rebalance_bracket_intents([intent], book_symbols={"BTCUSDT"})
+    assert not s.orders  # nothing was routed — no re-open on a bad read
+
+
+# --- C2: prior TP/SL brackets are cancelled before new ones are placed ----------
+def test_live_broker_cancel_open_orders_calls_cancel_all():
+    s = FakeSession()
+    BybitBroker(_cfg(), session=s).cancel_open_orders("BTCUSDT")
+    assert s.cancels == [{"category": "linear", "symbol": "BTCUSDT"}]
+
+
+def test_paper_broker_cancel_open_orders_is_noop():
+    s = FakeSession()
+    BybitBroker(_cfg(TradingMode.PAPER), session=s).cancel_open_orders("BTCUSDT")
+    assert s.cancels == []  # paper has no resting orders
+
+
+def test_cancel_open_orders_swallows_errors_and_does_not_abort():
+    class _Boom(FakeSession):
+        def cancel_all_orders(self, **kw):
+            raise RuntimeError("venue down")
+
+    # must NOT raise (best-effort hygiene)
+    BybitBroker(_cfg(), session=_Boom()).cancel_open_orders("BTCUSDT")

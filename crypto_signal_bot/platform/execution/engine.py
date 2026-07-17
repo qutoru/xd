@@ -7,6 +7,7 @@ for the deltas, and routes them through a Broker. It consumes a ready TargetBook
 
 from __future__ import annotations
 
+import uuid
 from typing import Sequence
 
 import pandas as pd
@@ -183,3 +184,157 @@ class ExecutionEngine:
                 continue
             requests.extend(self.build_bracket_orders(intent))
         return self._route(requests, self._intents_asof(intents, asof))
+
+    # --- delta-based bracket rebalance (no position accumulation) -----------
+    def rebalance_bracket_intents(
+        self,
+        intents: Sequence[TradeIntent],
+        *,
+        book_symbols: set[str] | None = None,
+        asof: pd.Timestamp | None = None,
+    ) -> ExecutionReport:
+        """Rebalance the broker to the intents' target positions (no accumulation).
+
+        Unlike :meth:`execute_bracket_intents` (which re-opens the *full* target
+        every call and so accumulates the position day over day), this reads the
+        broker's current positions and trades only the *delta* to each target:
+
+        * ``delta`` ~ 0        -> no entry;
+        * open / increase      -> a MARKET entry sized to the delta;
+        * decrease (same side) -> a MARKET order netting the position down;
+        * target 0 / departed  -> a reduce-only MARKET close of the whole position;
+        * side flip            -> reduce-only close of the old side, then a fresh
+          MARKET entry into the new side.
+
+        Reduce-only TP/SL are sized to the *final target* position. ``book_symbols``
+        is the full set the strategy still wants this cycle (before the risk-control
+        gate): a held symbol absent from it has left the book and is closed, while a
+        held symbol still in the book but absent from ``intents`` was refused by risk
+        control and is left untouched (risk control never closes). Defaults to the
+        intents' symbols.
+        """
+        asof_ts = self._intents_asof(intents, asof)
+        date = pd.Timestamp(asof_ts).date()
+        state = self.broker.get_portfolio_state()
+        current = {s: float(p.quantity) for s, p in state.positions.items()}
+        targets = {
+            i.symbol: (i.target_notional if i.side is Side.BUY else -i.target_notional)
+            for i in intents
+        }
+        intent_by_symbol = {i.symbol: i for i in intents}
+        book = set(targets) if book_symbols is None else set(book_symbols)
+
+        requests: list[OrderRequest] = []
+        touched: list[str] = []
+        for symbol in sorted(set(current) | set(targets)):
+            cur = current.get(symbol, 0.0)
+            if symbol in targets:
+                sym_reqs = self._rebalance_orders(
+                    symbol, cur, targets[symbol], intent_by_symbol[symbol], date
+                )
+            elif symbol not in book:
+                # held but gone from the book -> close the whole position
+                sym_reqs = self._close_orders(symbol, cur, date)
+            else:
+                # held, still wanted, refused by risk control -> leave untouched
+                sym_reqs = []
+            if sym_reqs:
+                touched.append(symbol)
+                requests.extend(sym_reqs)
+
+        # Clear any prior resting brackets for the symbols we are about to (re)place,
+        # so stale reduce-only TP/SL from earlier cycles cannot fire at outdated
+        # levels or accumulate toward the venue's open-order limit. Symbols left
+        # untouched (e.g. risk-control-blocked but still held) keep their brackets.
+        for symbol in touched:
+            self.broker.cancel_open_orders(symbol)
+        return self._route(requests, asof_ts)
+
+    def _rebalance_orders(
+        self, symbol: str, cur: float, tgt: float, intent: TradeIntent, date
+    ) -> list[OrderRequest]:
+        """Orders to move ``symbol`` from ``cur`` to ``tgt`` signed notional."""
+        tag = intent.strategy or "intent"
+        orders: list[OrderRequest] = []
+
+        if tgt == 0.0:
+            if abs(cur) > self.min_notional:
+                orders.append(self._close_request(symbol, cur, tag, date))
+            return orders
+
+        flip = cur != 0.0 and (cur > 0) != (tgt > 0)
+        if flip:
+            # close the old side fully, then open the new side fresh
+            orders.append(self._close_request(symbol, cur, tag, date))
+            orders.append(self._market_request(symbol, tgt, "entry", tag, date))
+        else:
+            delta = tgt - cur
+            if abs(delta) > self.min_notional:
+                # increase -> ``entry``; decrease -> ``reduce`` (a plain MARKET that
+                # nets the position down: the broker's reduce-only path would close
+                # the whole position, not just the delta).
+                kind = "entry" if abs(tgt) >= abs(cur) else "reduce"
+                orders.append(self._market_request(symbol, delta, kind, tag, date))
+
+        orders.extend(self._bracket_tp_sl(symbol, tgt, intent, tag))
+        return orders
+
+    def _close_orders(self, symbol: str, cur: float, date) -> list[OrderRequest]:
+        """Reduce-only MARKET close for a symbol that has left the book."""
+        if abs(cur) <= self.min_notional:
+            return []
+        return [self._close_request(symbol, cur, "rebalance", date)]
+
+    def _market_request(
+        self, symbol: str, signed_notional: float, kind: str, tag: str, date
+    ) -> OrderRequest:
+        return OrderRequest(
+            symbol=symbol,
+            side=Side.BUY if signed_notional > 0 else Side.SELL,
+            quantity=abs(signed_notional),
+            order_type=OrderType.MARKET,
+            client_id=f"{tag}-{symbol}-{date}-{kind}",
+        )
+
+    def _close_request(self, symbol: str, cur: float, tag: str, date) -> OrderRequest:
+        """Reduce-only MARKET order flattening the current position (never flips)."""
+        return OrderRequest(
+            symbol=symbol,
+            side=Side.SELL if cur > 0 else Side.BUY,
+            quantity=abs(cur),
+            order_type=OrderType.MARKET,
+            reduce_only=True,
+            client_id=f"{tag}-{symbol}-{date}-close",
+        )
+
+    def _bracket_tp_sl(
+        self, symbol: str, tgt: float, intent: TradeIntent, tag: str
+    ) -> list[OrderRequest]:
+        """Reduce-only TP/SL sized to the final target position (opposite side).
+
+        The client_id carries a per-placement unique token (not the date): this
+        method runs only in the delta-rebalance path, which cancels the prior
+        brackets *before* re-placing. A date-stamped (deterministic) id would then
+        collide with the just-cancelled order's orderLinkId — a venue that retains
+        cancelled ids (the same de-dup the entry path relies on for idempotency)
+        would reject the re-placement, leaving the position with NO stop-loss. A
+        fresh token makes the re-placement always accepted; the cancel (not the id)
+        is what prevents duplicate resting brackets.
+        """
+        close_side = Side.SELL if tgt > 0 else Side.BUY
+        notional = abs(tgt)
+        token = uuid.uuid4().hex[:8]
+        legs: list[OrderRequest] = []
+        if intent.take_profit is not None:
+            legs.append(OrderRequest(
+                symbol=symbol, side=close_side, quantity=notional,
+                order_type=OrderType.LIMIT, price=intent.take_profit,
+                reduce_only=True, client_id=f"{tag}-{symbol}-{token}-tp",
+            ))
+        if intent.stop_loss is not None:
+            legs.append(OrderRequest(
+                symbol=symbol, side=close_side, quantity=notional,
+                order_type=OrderType.STOP, price=intent.stop_loss,
+                reduce_only=True, client_id=f"{tag}-{symbol}-{token}-sl",
+            ))
+        return legs

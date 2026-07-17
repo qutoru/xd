@@ -291,10 +291,21 @@ class DailyPipeline:
         if self.execute and not halted:
             try:
                 if self.use_brackets:
-                    # Open the position AND place its reduce-only TP/SL in one existing
-                    # call (entry + reduce-only LIMIT TP + reduce-only STOP SL). Same-day
-                    # re-runs are idempotent via the date-stamped orderLinkId.
-                    exec_report = self.execution_engine.execute_bracket_intents(exec_intents)
+                    # Rebalance to the target positions (delta-based): open/increase,
+                    # reduce, or close so the account holds exactly the target — never
+                    # accumulating a fresh full-size entry each day. Reduce-only TP/SL
+                    # sit on the resulting target. Same-day re-runs stay idempotent by
+                    # construction: entries are date-stamped (venue de-dups them) and
+                    # the position is read back so the delta is ~0, while the brackets
+                    # are cancelled and re-placed with fresh ids (so the re-placement is
+                    # never rejected as a duplicate — no naked position). ``book_symbols``
+                    # lets a symbol that left the book be closed while a risk-control-
+                    # blocked (but still wanted) held symbol is left untouched.
+                    exec_report = self.execution_engine.rebalance_bracket_intents(
+                        exec_intents,
+                        book_symbols={i.symbol for i in intents},
+                        asof=book.asof,
+                    )
                     expected = _bracket_expected_weights(exec_intents, exec_report.resulting_state.value)
                 else:
                     # Legacy weight-rebalance. NOTE: this path sizes orders from

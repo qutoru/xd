@@ -54,7 +54,13 @@ class OrderRequest:
 
 @dataclass(frozen=True)
 class Fill:
-    """A (partial) execution of an order."""
+    """A (partial) execution of an order.
+
+    ``quantity`` is in base units (contracts), the broker fill convention — not
+    notional. The trailing fields are the accounting layer's inputs: they let a
+    fill be attributed to the order that caused it and booked into the realized-PnL
+    ledger. They default so pre-accounting call sites are unaffected.
+    """
 
     symbol: str
     side: Side
@@ -62,6 +68,10 @@ class Fill:
     price: float | None = None
     fee: float = 0.0
     timestamp: pd.Timestamp | None = None
+    order_link_id: str | None = None  # client_id of the originating order (attribution)
+    exec_id: str | None = None        # venue execution id (ledger de-dup key)
+    realized_pnl: float = 0.0         # PnL booked by this fill (nonzero on closes only)
+    closed_quantity: float = 0.0      # base qty this fill closed (>0 => a closing fill)
 
 
 @dataclass(frozen=True)

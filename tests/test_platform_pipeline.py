@@ -291,19 +291,34 @@ def test_paper_bracket_opens_position_and_places_reduce_only_tp_sl():
     assert result.execution.resulting_state.positions  # a position was opened
 
 
-def test_bracket_orderlinkids_are_deterministic_for_idempotency():
+def test_bracket_entry_ids_stable_but_bracket_ids_are_unique_per_run():
+    # Idempotency contract for the delta-rebalance path:
+    #  * entries are date-stamped and deterministic, so the venue de-dups a same-day
+    #    re-run (and the position read-back makes the delta ~0 anyway) -> no double
+    #    entry;
+    #  * TP/SL brackets get a FRESH id every run, because the rebalance cancels the
+    #    prior brackets before re-placing. A deterministic bracket id would collide
+    #    with the just-cancelled order and be rejected -> naked position. So bracket
+    #    ids MUST differ across runs.
     from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, TradingMode
 
     asof = pd.Timestamp("2023-05-01", tz="UTC")
     cfg = BybitConfig(api_key="k", api_secret="s", mode=TradingMode.PAPER)
-    ids1 = {o.request.client_id for o in
-            _bybit_pipeline(_snapshot(asof), cfg, session=_FakeBybitSession(),
-                            use_brackets=True).run_once(asof).execution.orders}
-    ids2 = {o.request.client_id for o in
-            _bybit_pipeline(_snapshot(asof), cfg, session=_FakeBybitSession(),
-                            use_brackets=True).run_once(asof).execution.orders}
-    # same as-of => identical orderLinkIds => Bybit dedupes a same-day re-run
-    assert ids1 == ids2 and all(cid.endswith(("-entry", "-tp", "-sl")) for cid in ids1)
+    orders1 = _bybit_pipeline(_snapshot(asof), cfg, session=_FakeBybitSession(),
+                              use_brackets=True).run_once(asof).execution.orders
+    orders2 = _bybit_pipeline(_snapshot(asof), cfg, session=_FakeBybitSession(),
+                              use_brackets=True).run_once(asof).execution.orders
+
+    def _ids(orders, suffix):
+        return {o.request.client_id for o in orders if o.request.client_id.endswith(suffix)}
+
+    # market entries stay identical (deterministic, de-dup-idempotent)
+    assert _ids(orders1, "-entry") == _ids(orders2, "-entry") and _ids(orders1, "-entry")
+    # reduce-only brackets are disjoint across runs (fresh ids -> re-placement never
+    # rejected as a duplicate after the cancel)
+    tp_sl_1 = _ids(orders1, "-tp") | _ids(orders1, "-sl")
+    tp_sl_2 = _ids(orders2, "-tp") | _ids(orders2, "-sl")
+    assert tp_sl_1 and tp_sl_2 and tp_sl_1.isdisjoint(tp_sl_2)
 
 
 def test_bracket_tp_sl_rejection_leaves_position_and_continues():

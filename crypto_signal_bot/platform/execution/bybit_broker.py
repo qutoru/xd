@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+import pandas as pd
 from loguru import logger
 
 from crypto_signal_bot.platform.execution.broker import Broker
@@ -39,6 +40,15 @@ def _to_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _at_or_after(ts: pd.Timestamp | None, since: pd.Timestamp | None) -> bool:
+    """True when ``ts`` is at/after the inclusive ``since`` bound (None => keep)."""
+    if since is None:
+        return True
+    if ts is None:
+        return False
+    return ts >= since
 
 
 @dataclass(frozen=True)
@@ -72,6 +82,10 @@ class BybitBroker(Broker):
         self._session = session
         self._instruments: dict[str, InstrumentInfo] = {}
         self._paper_book: dict[str, _PaperPosition] = {}
+        # PAPER has no venue execution feed, so it records its own simulated fills
+        # (with realized PnL) here to back get_fills. LIVE reads the real feed.
+        self._paper_fills: list[Fill] = []
+        self._paper_exec_seq = 0
 
     # --- connection / market data ------------------------------------------
     def _get_session(self):
@@ -220,27 +234,105 @@ class BybitBroker(Broker):
             return OrderResult(request=request, status=OrderStatus.PENDING,
                                message="paper: bracket resting")
         signed = base_qty if request.side is Side.BUY else -base_qty
-        self._apply_paper_fill(request.symbol, signed, ref_price)
-        fill = Fill(symbol=request.symbol, side=request.side, quantity=base_qty, price=ref_price)
+        realized, closed_qty = self._apply_paper_fill(request.symbol, signed, ref_price)
+        self._paper_exec_seq += 1
+        fill = Fill(
+            symbol=request.symbol, side=request.side, quantity=base_qty, price=ref_price,
+            timestamp=pd.Timestamp.now(tz="UTC"), order_link_id=request.client_id,
+            exec_id=f"paper-{self._paper_exec_seq}", realized_pnl=realized,
+            closed_quantity=closed_qty,
+        )
+        self._paper_fills.append(fill)
         return OrderResult(request=request, status=OrderStatus.FILLED,
                            filled_quantity=base_qty, avg_price=ref_price,
                            fills=[fill], message="paper fill")
 
-    def _apply_paper_fill(self, symbol: str, signed_qty: float, price: float) -> None:
+    def _apply_paper_fill(self, symbol: str, signed_qty: float, price: float) -> tuple[float, float]:
+        """Apply a paper fill; return (realized_pnl, closed_base_qty).
+
+        A fill that opposes the held side realizes PnL on the closed portion
+        ``min(|fill|, |held|)`` at ``avg_price``; the remainder (on a flip) opens
+        the new side at ``price``. A same-side fill only extends the position.
+        """
         pos = self._paper_book.setdefault(symbol, _PaperPosition())
-        new_qty = pos.base_qty + signed_qty
+        realized = 0.0
+        closed_qty = 0.0
         if pos.base_qty == 0 or (pos.base_qty > 0) == (signed_qty > 0):
+            # opening or increasing the same side: volume-weight the average price
             total = abs(pos.base_qty) + abs(signed_qty)
             pos.avg_price = price if total == 0 else (
                 abs(pos.base_qty) * pos.avg_price + abs(signed_qty) * price
             ) / total
-        pos.base_qty = new_qty
-        if abs(new_qty) < 1e-12:
+        else:
+            # reducing/closing (possibly flipping): the overlap realizes PnL
+            closed_qty = min(abs(signed_qty), abs(pos.base_qty))
+            direction = 1.0 if pos.base_qty > 0 else -1.0
+            realized = closed_qty * (price - pos.avg_price) * direction
+            if abs(signed_qty) > abs(pos.base_qty):  # flip: open remainder at price
+                pos.avg_price = price
+        pos.base_qty += signed_qty
+        if abs(pos.base_qty) < 1e-12:
             self._paper_book.pop(symbol, None)
+        return realized, closed_qty
 
     @staticmethod
     def _reject(request: OrderRequest, message: str) -> OrderResult:
         return OrderResult(request=request, status=OrderStatus.REJECTED, message=message)
+
+    def cancel_open_orders(self, symbol: str) -> None:
+        """Cancel all resting orders for ``symbol`` (clears prior TP/SL brackets).
+
+        PAPER holds no resting orders (brackets never rest there), so it is a no-op.
+        On a real venue a failed cancel is logged and swallowed — it must not abort
+        the trading cycle; reduce-only bounds any surviving stale bracket to closing.
+        """
+        if self.config.mode is TradingMode.PAPER:
+            return
+        try:
+            self._get_session().cancel_all_orders(
+                category=self.config.category, symbol=symbol
+            )
+        except Exception as exc:  # best-effort hygiene, never abort the cycle
+            logger.warning("cancel_all_orders failed for {}: {}", symbol, exc)
+
+    def get_fills(self, since: pd.Timestamp | None = None) -> list[Fill]:
+        """Executions at/after ``since`` — PAPER's simulated fills or the LIVE feed.
+
+        LIVE pages Bybit's execution list (``get_executions``), keeping only real
+        trades (``execType == 'Trade'`` — funding/settlement rows are excluded) and
+        mapping each to a :class:`Fill` with its ``orderLinkId`` (attribution),
+        ``execId`` (ledger de-dup), fee, ``closedSize`` and the venue's realized
+        PnL. A signalled API error fails loud rather than reporting no fills.
+        """
+        if self.config.mode is TradingMode.PAPER:
+            return [f for f in self._paper_fills if _at_or_after(f.timestamp, since)]
+
+        resp = self._get_session().get_executions(category=self.config.category)
+        if int(resp.get("retCode", 0)) != 0:
+            raise RuntimeError(
+                f"get_executions failed (retCode={resp.get('retCode')} "
+                f"retMsg={resp.get('retMsg')!r}); refusing to report no fills"
+            )
+        fills: list[Fill] = []
+        for row in resp.get("result", {}).get("list", []):
+            if row.get("execType") != "Trade":
+                continue
+            ts = pd.Timestamp(int(_to_float(row.get("execTime"))), unit="ms", tz="UTC")
+            if not _at_or_after(ts, since):
+                continue
+            fills.append(Fill(
+                symbol=row.get("symbol", ""),
+                side=Side.BUY if row.get("side") == "Buy" else Side.SELL,
+                quantity=_to_float(row.get("execQty")),
+                price=_to_float(row.get("execPrice")),
+                fee=_to_float(row.get("execFee")),
+                timestamp=ts,
+                order_link_id=row.get("orderLinkId") or None,
+                exec_id=row.get("execId") or None,
+                realized_pnl=_to_float(row.get("execPnl") or row.get("closedPnl")),
+                closed_quantity=_to_float(row.get("closedSize")),
+            ))
+        return fills
 
     # --- reconciliation -----------------------------------------------------
     def _position_base_qty(self, symbol: str) -> float:
@@ -256,6 +348,15 @@ class BybitBroker(Broker):
         resp = self._get_session().get_positions(
             category=self.config.category, settleCoin="USDT"
         )
+        # Fail loud on a signalled API error: a non-zero retCode must NOT be read as
+        # an empty (flat) book. Otherwise get_portfolio_state would report no
+        # positions and a delta-rebalance would treat every target as a fresh open —
+        # re-accumulating the position and skipping the close of departed names.
+        if int(resp.get("retCode", 0)) != 0:
+            raise RuntimeError(
+                f"get_positions failed (retCode={resp.get('retCode')} "
+                f"retMsg={resp.get('retMsg')!r}); refusing to treat account as flat"
+            )
         out: dict[str, tuple[float, float]] = {}
         for row in resp.get("result", {}).get("list", []):
             size = _to_float(row.get("size"))

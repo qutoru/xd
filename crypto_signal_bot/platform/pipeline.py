@@ -204,7 +204,15 @@ class DailyPipeline:
         if self.risk_state is not None and state is not None:
             iso = date.isoformat()
             if state.day == iso and state.day_start_nav is not None:
-                return float(state.day_start_nav), float(state.day_start_realized_pnl or 0.0)
+                if state.day_start_realized_pnl is None:
+                    # State persisted before Stage 18 has no realized baseline. Backfill
+                    # it from the current cumulative so today's realized delta starts at
+                    # zero from here, rather than treating the entire lifetime realized
+                    # PnL as today's loss. NAV baseline is untouched, so the NAV-delta
+                    # daily-loss path is unchanged.
+                    state.day_start_realized_pnl = realized_now
+                    self.risk_state.save(state)
+                return float(state.day_start_nav), float(state.day_start_realized_pnl)
             state.day = iso
             state.day_start_nav = nav
             state.day_start_realized_pnl = realized_now

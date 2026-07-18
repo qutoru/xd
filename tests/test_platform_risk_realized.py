@@ -224,3 +224,30 @@ def test_e2e_realized_loss_from_trading_halts_next_cycle(tmp_path):
     r3 = pipe.run_once(asof)
     assert r3.risk_control.halted
     assert r3.risk_control.halt_reason is BlockReason.DAILY_LOSS_LIMIT
+
+
+# =============================================================================
+# Backward compatibility — a same-day state persisted before Stage 18 has no
+# realized baseline (day_start_realized_pnl is None). The anchor must backfill it
+# from the current cumulative, NOT treat the whole lifetime realized PnL as
+# today's loss (which the old ``... or 0.0`` fallback did).
+# =============================================================================
+def test_pre_stage18_state_backfills_realized_anchor(tmp_path):
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    rss = RiskStateStore(tmp_path / "risk.json")
+    # Pre-Stage-18 record: NAV baseline present, realized baseline absent.
+    rss.save(RiskState(day=asof.date().isoformat(), day_start_nav=10_000.0))
+    pipe, _ = _pipeline(_MultiPriceSession(), risk_state=rss, use_realized=True)
+
+    state = rss.load()
+    assert state.day_start_realized_pnl is None            # pre-Stage-18 shape
+
+    # Lifetime cumulative realized is a large negative; it must be adopted as the
+    # day-start baseline (today's delta = 0), not read as a -5000 loss booked today.
+    day_start_nav, day_start_realized = pipe._risk_day_anchor(
+        asof, 10_000.0, -5000.0, state)
+    assert day_start_nav == 10_000.0
+    assert day_start_realized == -5000.0
+
+    # ...and the backfill is persisted so later same-day runs stay consistent.
+    assert rss.load().day_start_realized_pnl == -5000.0

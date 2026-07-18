@@ -23,6 +23,12 @@ data/backtests/
 data/universe.json
 *.parquet
 
+# Per-chat Telegram language preferences (contains chat ids)
+data/telegram_prefs.json
+# Bot subscription state + known-users registry (contain chat ids / usernames)
+data/subscriptions.json
+data/users.json
+
 # Trained models (generated artifacts)
 models/*.txt
 models/*_meta.json

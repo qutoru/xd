@@ -46,6 +46,16 @@ HISTORY_DAYS: int = 180
 TOP_N_SYMBOLS: int = 50
 UNIVERSE_PATH: Path = DATA_DIR / "universe.json"
 
+# Per-chat Telegram language preferences (RU/EN), persisted across bot restarts.
+TELEGRAM_PREFS_PATH: Path = DATA_DIR / "telegram_prefs.json"
+# Bot subscription state (chat_id -> expiry/plan) and the known-users registry.
+TELEGRAM_SUBS_PATH: Path = DATA_DIR / "subscriptions.json"
+TELEGRAM_USERS_PATH: Path = DATA_DIR / "users.json"
+# Realized-PnL ledger the bot reads for /stats (PRO/VIP) and per-chat personal
+# risk level for /risk (VIP).
+TELEGRAM_LEDGER_PATH: Path = DATA_DIR / "ledger.json"
+TELEGRAM_RISK_PREFS_PATH: Path = DATA_DIR / "risk_prefs.json"
+
 # Enrich raw data with funding rate + open interest features. Implemented and
 # tested (see RESEARCH.md E3) but did NOT improve out-of-sample edge on 15m, so
 # it is OFF by default to keep the pipeline fast and consistent. Flip to True

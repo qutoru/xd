@@ -22,6 +22,8 @@ from typing import Protocol
 from loguru import logger
 
 from crypto_signal_bot.platform.execution.intent import TradeIntent
+from crypto_signal_bot.platform.notify.i18n import DEFAULT_LANGUAGE
+from crypto_signal_bot.platform.notify.prefs import LanguagePrefsStore
 from crypto_signal_bot.platform.notify.telegram import TelegramFormatter
 
 _DEFAULT_API_BASE = "https://api.telegram.org"
@@ -112,15 +114,26 @@ class TelegramNotifier:
         *,
         formatter: TelegramFormatter | None = None,
         client: TelegramClient | None = None,
+        prefs: LanguagePrefsStore | None = None,
     ) -> None:
         self.config = config or TelegramConfig()
         self.formatter = formatter or TelegramFormatter()
         self._client = client
+        self._prefs = prefs
 
     @classmethod
     def from_env(cls, *, enabled: bool = True, dry_run: bool = False) -> TelegramNotifier:
         """Build a notifier with credentials pulled from the environment."""
         return cls(TelegramConfig.from_env(enabled=enabled, dry_run=dry_run))
+
+    def _language(self) -> str:
+        """Language for the configured chat (default when no prefs store)."""
+        if self._prefs is None:
+            return DEFAULT_LANGUAGE
+        return self._prefs.get(self.config.chat_id)
+
+    def _render(self, intent: TradeIntent) -> str:
+        return self.formatter.format(intent, self._language())
 
     def _get_client(self) -> TelegramClient:
         if self._client is None:
@@ -141,14 +154,14 @@ class TelegramNotifier:
                 "disabled" if not self.config.enabled else "no TELEGRAM_* credentials"
             )
             for intent in intents:
-                logger.info("[telegram:{}] not sent:\n{}", reason, self.formatter.format(intent))
+                logger.info("[telegram:{}] not sent:\n{}", reason, self._render(intent))
             return NotifyResult(skipped=len(intents))
 
         client = self._get_client()
         sent = failed = 0
         errors: list[str] = []
         for intent in intents:
-            text = self.formatter.format(intent)
+            text = self._render(intent)
             try:
                 client.send_message(chat_id=self.config.chat_id, text=text)
                 sent += 1

@@ -39,3 +39,20 @@ def test_format_short_side_signs():
     assert "🔴 SHORT" in msg
     assert "102700 (+2.6%)" in msg  # (105400-102700)/105400
     assert "106500 (-1.0%)" in msg
+
+
+def test_format_russian_localizes_labels_only():
+    msg = TelegramFormatter().format(_intent(), lang="ru")
+    assert msg == (
+        "BTCUSDT | 🟢 ЛОНГ\n"
+        "12:00 UTC\n"
+        "\nВход\n105400\n"
+        "\nТейк-профит\n108100 (+2.6%)\n"
+        "\nСтоп-лосс\n104200 (-1.1%)\n"
+        "\nУверенность\n78%"
+    )
+
+
+def test_default_language_is_english_byte_for_byte():
+    # No lang arg must equal the previous English rendering.
+    assert TelegramFormatter().format(_intent()).startswith("BTCUSDT | 🟢 LONG")

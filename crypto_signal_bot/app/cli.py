@@ -182,6 +182,50 @@ def cmd_trade(args: argparse.Namespace) -> int:
     return run_trade(signals=signals, asof=asof)
 
 
+def cmd_bot(args: argparse.Namespace) -> int:
+    """Run the Telegram bot listener (long-polling): /start, /language, buttons."""
+    import os
+
+    from crypto_signal_bot.config import (
+        TELEGRAM_LEDGER_PATH,
+        TELEGRAM_PREFS_PATH,
+        TELEGRAM_RISK_PREFS_PATH,
+        TELEGRAM_SUBS_PATH,
+        TELEGRAM_USERS_PATH,
+    )
+    from crypto_signal_bot.platform.accounting.ledger import AccountingStore
+    from crypto_signal_bot.platform.notify.listener import (
+        RequestsBotClient,
+        TelegramListener,
+    )
+    from crypto_signal_bot.platform.notify.prefs import LanguagePrefsStore
+    from crypto_signal_bot.platform.notify.riskprefs import RiskPrefsStore
+    from crypto_signal_bot.platform.notify.subscriptions import SubscriptionStore
+    from crypto_signal_bot.platform.notify.users import UsersStore
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        logger.error("TELEGRAM_BOT_TOKEN is not set — cannot start the bot listener.")
+        return 2
+
+    admin_id = os.getenv("TELEGRAM_ADMIN_ID", "")
+    if not admin_id:
+        logger.warning("TELEGRAM_ADMIN_ID is not set — admin commands are disabled.")
+
+    client = RequestsBotClient(token)
+    listener = TelegramListener(
+        client,
+        LanguagePrefsStore(TELEGRAM_PREFS_PATH),
+        subscriptions=SubscriptionStore(TELEGRAM_SUBS_PATH),
+        users=UsersStore(TELEGRAM_USERS_PATH),
+        admin_id=admin_id or None,
+        ledger_store=AccountingStore(TELEGRAM_LEDGER_PATH),
+        risk_prefs=RiskPrefsStore(TELEGRAM_RISK_PREFS_PATH),
+    )
+    listener.run_forever(timeout=args.poll_timeout)
+    return 0
+
+
 def _add_symbol_arg(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--symbol", default=None,
                      help="Target a single symbol instead of the whole universe.")
@@ -292,6 +336,13 @@ def build_parser() -> argparse.ArgumentParser:
     trade_parser.add_argument("--asof", default=None,
                               help="As-of date YYYY-MM-DD (default: today, UTC).")
     trade_parser.set_defaults(func=cmd_trade)
+
+    bot_parser = subparsers.add_parser(
+        "bot",
+        help="Run the Telegram bot listener (long-polling): /start, /language, buttons.")
+    bot_parser.add_argument("--poll-timeout", type=int, default=30,
+                            help="getUpdates long-poll timeout in seconds (default: 30).")
+    bot_parser.set_defaults(func=cmd_bot)
 
     return parser
 

@@ -10,8 +10,7 @@ from __future__ import annotations
 
 from crypto_signal_bot.platform.execution.domain import Side
 from crypto_signal_bot.platform.execution.intent import TradeIntent
-
-_SIDE_LABEL = {Side.BUY: "🟢 LONG", Side.SELL: "🔴 SHORT"}
+from crypto_signal_bot.platform.notify.i18n import DEFAULT_LANGUAGE, t
 
 
 def _pct(intent: TradeIntent, level: float) -> float:
@@ -21,19 +20,27 @@ def _pct(intent: TradeIntent, level: float) -> float:
 
 
 class TelegramFormatter:
-    """Renders TradeIntents into Telegram messages (exact futures layout)."""
+    """Renders TradeIntents into Telegram messages (exact futures layout).
 
-    def format(self, intent: TradeIntent) -> str:
+    Only the labels are localized (via the i18n catalog); numbers, symbols and
+    percentages are language-independent. ``lang`` defaults to English, so the
+    original rendering is preserved byte-for-byte.
+    """
+
+    def format(self, intent: TradeIntent, lang: str = DEFAULT_LANGUAGE) -> str:
         """Telegram message for one intent (no leverage/reason/RR)."""
-        parts = [f"{intent.symbol} | {_SIDE_LABEL[intent.side]}"]
+        side_key = "side_long" if intent.side == Side.BUY else "side_short"
+        parts = [f"{intent.symbol} | {t(lang, side_key)}"]
         if intent.timestamp is not None:
             parts.append(intent.timestamp.strftime("%H:%M UTC"))
         if intent.entry is not None:
-            parts += ["", "Entry", f"{intent.entry:g}"]
+            parts += ["", t(lang, "entry"), f"{intent.entry:g}"]
         if intent.take_profit is not None and intent.entry:
-            parts += ["", "Take Profit", f"{intent.take_profit:g} ({_pct(intent, intent.take_profit):+.1%})"]
+            parts += ["", t(lang, "take_profit"),
+                      f"{intent.take_profit:g} ({_pct(intent, intent.take_profit):+.1%})"]
         if intent.stop_loss is not None and intent.entry:
-            parts += ["", "Stop Loss", f"{intent.stop_loss:g} ({_pct(intent, intent.stop_loss):+.1%})"]
+            parts += ["", t(lang, "stop_loss"),
+                      f"{intent.stop_loss:g} ({_pct(intent, intent.stop_loss):+.1%})"]
         if intent.confidence is not None:
-            parts += ["", "Confidence", f"{intent.confidence:.0%}"]
+            parts += ["", t(lang, "confidence"), f"{intent.confidence:.0%}"]
         return "\n".join(parts)

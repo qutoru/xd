@@ -100,9 +100,18 @@ class SubscriberBroadcaster:
             )[: ent.max_pairs]
         return items
 
-    def broadcast(self, intents: list[TradeIntent]) -> BroadcastResult:
-        """Deliver ``intents`` to every active subscriber; never raises on send."""
+    def broadcast(
+        self, intents: list[TradeIntent], *, exclude: set[str] | None = None
+    ) -> BroadcastResult:
+        """Deliver ``intents`` to every active subscriber; never raises on send.
+
+        ``exclude`` drops chat_ids that must not receive the plain broadcast — used
+        to keep the owner out of the subscriber fan-out when they already got the
+        owner-only buttoned copy, so no one gets a duplicate.
+        """
         active = self._subs.active()
+        if exclude:
+            active = [s for s in active if s.chat_id not in exclude]
         if not active or not intents:
             return BroadcastResult(recipients=len(active))
 

@@ -134,6 +134,7 @@ class TelegramListener:
         admin_id: str | None = None,
         ledger_store: AccountingStore | None = None,
         risk_prefs: RiskPrefsStore | None = None,
+        owner_handler=None,
     ) -> None:
         self._client = client
         self._prefs = prefs
@@ -142,6 +143,9 @@ class TelegramListener:
         self._admin_id = str(admin_id) if admin_id else None
         self._ledger_store = ledger_store  # source for /stats (PRO/VIP)
         self._risk_prefs = risk_prefs       # personal risk level for /risk (VIP)
+        # Owner-only semi-auto approval (Accept/Ignore on pushed signals). Optional
+        # and owner-gated inside the handler, so it stays invisible to other users.
+        self._owner_handler = owner_handler
 
     # -- individual update handling ---------------------------------------
 
@@ -201,6 +205,9 @@ class TelegramListener:
                 text=t(lang, "subscribe"),
                 reply_markup=back_keyboard(lang),
             )
+        elif command == "/help":
+            lang = self._prefs.get(chat_id)
+            self._client.send_message(chat_id=chat_id, text=t(lang, "help"))
         elif command == "/stats":
             self._on_stats(chat_id, self._prefs.get(chat_id))
         elif command == "/risk":
@@ -228,9 +235,10 @@ class TelegramListener:
         grant/revoke). A transport error here must never break message handling.
         """
         lang = self._prefs.get(chat_id)
+        is_admin = self._admin_id is not None and chat_id == self._admin_id
         try:
             self._client.set_my_commands(
-                commands=tier_command_menu(self._entitlements(chat_id), lang),
+                commands=tier_command_menu(self._entitlements(chat_id), lang, is_admin=is_admin),
                 scope={"type": "chat", "chat_id": chat_id},
             )
         except Exception as exc:  # best-effort: menu is cosmetic, don't crash
@@ -372,6 +380,16 @@ class TelegramListener:
         message = callback.get("message") or {}
         chat_id = str(message.get("chat", {}).get("id", ""))
         message_id = message.get("message_id")
+        from_id = str((callback.get("from") or {}).get("id", "")) or chat_id
+
+        # Owner-only approval buttons (own:acc / own:ign). Owner-gated inside the
+        # handler; any tap from a non-owner is refused there without side effects.
+        if self._owner_handler is not None and self._owner_handler.handles(data):
+            self._owner_handler.handle(
+                data=data, from_id=from_id, chat_id=chat_id,
+                message_id=message_id, callback_id=callback_id, client=self._client,
+            )
+            return
 
         # "Back" button under /subscribe: return to the greeting.
         if data == _BACK_DATA and chat_id and message_id is not None:

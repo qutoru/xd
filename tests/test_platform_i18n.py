@@ -37,12 +37,13 @@ def test_unknown_language_uses_english_strings():
 def test_greeting_present_in_both_languages():
     assert "Bybit Smart Signals" in t("en", "welcome")
     assert "Bybit Smart Signals" in t("ru", "welcome")
-    # commands advertised in the greeting (/status was removed)
-    for cmd in ("/subscribe", "/signals", "/help"):
+    # commands advertised in the greeting (/status and /signals were removed)
+    for cmd in ("/subscribe", "/help"):
         assert cmd in t("en", "welcome")
         assert cmd in t("ru", "welcome")
-    assert "/status" not in t("en", "welcome")
-    assert "/status" not in t("ru", "welcome")
+    for absent in ("/status", "/signals"):
+        assert absent not in t("en", "welcome")
+        assert absent not in t("ru", "welcome")
 
 
 def test_subscribe_plans_present_in_both_languages():

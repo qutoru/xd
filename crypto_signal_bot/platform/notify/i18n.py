@@ -134,6 +134,17 @@ _CATALOG: dict[str, dict[str, str]] = {
         "take_profit": "Take Profit",
         "stop_loss": "Stop Loss",
         "confidence": "Confidence",
+        # Owner-only semi-automatic approval (invisible to other users).
+        "owner_prompt": "Place this order?",
+        "owner_accept": "✅ Accept",
+        "owner_ignore": "🚫 Ignore",
+        "owner_denied": "Not available.",
+        "owner_gone": "⌛ This signal is no longer available.",
+        "owner_expired": "⌛ Signal expired — not placed.",
+        "owner_ignored": "🚫 Ignored — no order placed.",
+        "owner_blocked": "⛔ Blocked by risk control: {reason}. No order placed.",
+        "owner_accepted": "✅ Accepted {symbol} {side} — filled {filled}, rejected {rejected}.",
+        "owner_error": "⚠️ Order placement failed — see logs. Not placed.",
         "welcome": (
             "Hi, this is Bybit Smart Signals!\n"
             "\n"
@@ -149,14 +160,59 @@ _CATALOG: dict[str, dict[str, str]] = {
             "\n"
             "/subscribe — get a subscription\n"
             "\n"
-            "/signals — latest signals\n"
-            "\n"
             "/help — help"
         ),
         "disclaimer": (
             "⚠️ Signals are for informational purposes only. Trading "
             "cryptocurrency carries a risk of losing funds."
         ),
+        "help": "\n".join([
+            "Help — Bybit Smart Signals",
+            "",
+            "Commands",
+            "/start — restart the bot",
+            "/subscribe — plans and payment",
+            "/stats — trade statistics (PRO, VIP)",
+            "/risk — risk level settings (VIP)",
+            "/help — this message",
+            "",
+            "How to read a signal",
+            "Each signal includes the pair and direction (Long or Short), the entry "
+            "price, Take-Profit and Stop-Loss levels computed from ATR, and the "
+            "model's confidence.",
+            "",
+            "Statistics",
+            "The /stats command shows signal results over a period: number of trades, "
+            "share of profitable ones, average profit and drawdown. Available on the "
+            "PRO and VIP plans.",
+            "",
+            "Risk settings",
+            "The /risk command lets you set the Stop-Loss and Take-Profit multiplier to "
+            "match your trading style: conservative, standard or aggressive. Available "
+            "on the VIP plan.",
+            "",
+            "Notifications",
+            "Arrive automatically as soon as the model finds an entry point.",
+            "",
+            "Subscription",
+            "Access to signals is by subscription. Plans and payment: /subscribe",
+            "Payment is accepted mainly in crypto (USDT and other popular coins).",
+            "",
+            "FAQ",
+            "How to pay? Payment is accepted mainly in crypto — USDT, BTC, ETH. For "
+            "other methods, contact support.",
+            "No signals? Your subscription may be inactive — check via /subscribe.",
+            "Paid but no access? Contact support, we'll sort it out in a couple of minutes.",
+            "Command unavailable? Check whether it's included in your plan — /subscribe.",
+            "Does the bot trade by itself? No. The bot only sends signals; you open all "
+            "trades manually.",
+            "",
+            "Support",
+            "For any questions — @Daxakson",
+            "We usually reply within a few hours.",
+            "",
+            "Trading cryptocurrency carries a risk of losing funds.",
+        ]),
         "subscribe": _SUBSCRIBE_EN,
         "back_button": "⬅️ Back",
         "admin_grant_usage": "Usage: /grant <user_id|@username> <days> [plan]",
@@ -188,8 +244,13 @@ _CATALOG: dict[str, dict[str, str]] = {
         "cmd_start": "Restart / choose language",
         "cmd_language": "Change language",
         "cmd_subscribe": "View subscription plans",
+        "cmd_help": "How the bot works & FAQ",
         "cmd_stats": "Trade statistics (PRO/VIP)",
         "cmd_risk": "Personal risk settings (VIP)",
+        "cmd_grant": "Grant/extend a subscription (admin)",
+        "cmd_revoke": "Revoke a subscription (admin)",
+        "cmd_subs": "List active subscriptions (admin)",
+        "cmd_users": "List known users (admin)",
         "switched": (
             "✅ Language switched to English\n"
             "\n"
@@ -210,6 +271,17 @@ _CATALOG: dict[str, dict[str, str]] = {
         "take_profit": "Тейк-профит",
         "stop_loss": "Стоп-лосс",
         "confidence": "Уверенность",
+        # Приватный полуавтоматический режим владельца (невидим для других).
+        "owner_prompt": "Выставить ордер?",
+        "owner_accept": "✅ Принять",
+        "owner_ignore": "🚫 Игнорировать",
+        "owner_denied": "Недоступно.",
+        "owner_gone": "⌛ Этот сигнал уже недоступен.",
+        "owner_expired": "⌛ Сигнал устарел — ордер не выставлен.",
+        "owner_ignored": "🚫 Проигнорировано — ордер не выставлен.",
+        "owner_blocked": "⛔ Заблокировано риск-контролем: {reason}. Ордер не выставлен.",
+        "owner_accepted": "✅ Принято {symbol} {side} — исполнено {filled}, отклонено {rejected}.",
+        "owner_error": "⚠️ Не удалось выставить ордер — см. логи. Не выставлено.",
         "welcome": (
             "Привет, это Bybit Smart Signals!\n"
             "\n"
@@ -225,14 +297,60 @@ _CATALOG: dict[str, dict[str, str]] = {
             "\n"
             "/subscribe — оформить подписку\n"
             "\n"
-            "/signals — последние сигналы\n"
-            "\n"
             "/help — помощь"
         ),
         "disclaimer": (
             "⚠️ Сигналы носят информационный характер. Торговля "
             "криптовалютой сопряжена с риском потери средств."
         ),
+        "help": "\n".join([
+            "Помощь — Bybit Smart Signals",
+            "",
+            "Команды",
+            "/start — перезапустить бота",
+            "/subscribe — тарифы и оплата",
+            "/stats — статистика по сделкам (PRO, VIP)",
+            "/risk — настройка уровня риска (VIP)",
+            "/help — это сообщение",
+            "",
+            "Как читать сигнал",
+            "Каждый сигнал содержит пару и направление (Long или Short), цену входа, "
+            "уровни Take-Profit и Stop-Loss, рассчитанные по ATR, а также уверенность "
+            "модели.",
+            "",
+            "Статистика",
+            "Команда /stats показывает результаты сигналов за период: количество сделок, "
+            "долю прибыльных, среднюю прибыль и просадку. Доступна на тарифах PRO и VIP.",
+            "",
+            "Настройка риска",
+            "Команда /risk позволяет задать множитель Stop-Loss и Take-Profit под свой "
+            "стиль торговли: консервативный, стандартный или агрессивный. Доступна на "
+            "тарифе VIP.",
+            "",
+            "Уведомления",
+            "Приходят автоматически, как только модель находит точку входа.",
+            "",
+            "Подписка",
+            "Доступ к сигналам — по подписке. Тарифы и оплата: /subscribe",
+            "Оплата принимается преимущественно в криптовалюте (USDT и другие популярные "
+            "монеты).",
+            "",
+            "Частые вопросы",
+            "Как оплатить? Оплата принимается преимущественно в криптовалюте — USDT, BTC, "
+            "ETH. По другим способам напишите в поддержку.",
+            "Не приходят сигналы? Возможно, подписка неактивна — проверить можно через "
+            "/subscribe.",
+            "Оплатил, доступа нет? Напишите в поддержку, решим за пару минут.",
+            "Команда недоступна? Проверьте, входит ли она в ваш тариф — /subscribe.",
+            "Бот торгует сам? Нет. Бот только присылает сигналы, все сделки вы открываете "
+            "вручную.",
+            "",
+            "Поддержка",
+            "По любым вопросам — @Daxakson",
+            "Отвечаем обычно в течение нескольких часов.",
+            "",
+            "Торговля криптовалютой сопряжена с риском потери средств.",
+        ]),
         "subscribe": _SUBSCRIBE_RU,
         "back_button": "⬅️ Назад",
         "admin_grant_usage": "Использование: /grant <user_id|@username> <дней> [план]",
@@ -264,8 +382,13 @@ _CATALOG: dict[str, dict[str, str]] = {
         "cmd_start": "Перезапуск / выбор языка",
         "cmd_language": "Сменить язык",
         "cmd_subscribe": "Тарифы подписки",
+        "cmd_help": "Как работает бот и FAQ",
         "cmd_stats": "Статистика по сделкам (PRO/VIP)",
         "cmd_risk": "Настройки риска (VIP)",
+        "cmd_grant": "Выдать/продлить подписку (админ)",
+        "cmd_revoke": "Отозвать подписку (админ)",
+        "cmd_subs": "Активные подписки (админ)",
+        "cmd_users": "Список пользователей (админ)",
         "switched": (
             "✅ Язык переключён на русский\n"
             "\n"

@@ -188,6 +188,7 @@ def cmd_bot(args: argparse.Namespace) -> int:
 
     from crypto_signal_bot.config import (
         TELEGRAM_LEDGER_PATH,
+        TELEGRAM_PENDING_PATH,
         TELEGRAM_PREFS_PATH,
         TELEGRAM_RISK_PREFS_PATH,
         TELEGRAM_SUBS_PATH,
@@ -212,18 +213,78 @@ def cmd_bot(args: argparse.Namespace) -> int:
     if not admin_id:
         logger.warning("TELEGRAM_ADMIN_ID is not set — admin commands are disabled.")
 
+    prefs = LanguagePrefsStore(TELEGRAM_PREFS_PATH)
+    ledger_store = AccountingStore(TELEGRAM_LEDGER_PATH)
+    # Owner-only semi-auto approval: build it only when an owner (== admin) and a
+    # broker mode exist. Owner == TELEGRAM_ADMIN_ID; the whole surface is owner-gated
+    # inside the handler, so it stays invisible and inert for every other user.
+    owner_handler = _build_owner_handler(
+        admin_id or None, PendingPaths(TELEGRAM_PENDING_PATH, prefs, ledger_store)
+    )
+
     client = RequestsBotClient(token)
     listener = TelegramListener(
         client,
-        LanguagePrefsStore(TELEGRAM_PREFS_PATH),
+        prefs,
         subscriptions=SubscriptionStore(TELEGRAM_SUBS_PATH),
         users=UsersStore(TELEGRAM_USERS_PATH),
         admin_id=admin_id or None,
-        ledger_store=AccountingStore(TELEGRAM_LEDGER_PATH),
+        ledger_store=ledger_store,
         risk_prefs=RiskPrefsStore(TELEGRAM_RISK_PREFS_PATH),
+        owner_handler=owner_handler,
     )
     listener.run_forever(timeout=args.poll_timeout)
     return 0
+
+
+class PendingPaths:
+    """Small bundle of the stores the owner-approval handler needs."""
+
+    def __init__(self, pending_path, prefs, ledger_store) -> None:
+        self.pending_path = pending_path
+        self.prefs = prefs
+        self.ledger_store = ledger_store
+
+
+def _build_owner_handler(owner_id, paths: "PendingPaths"):
+    """Construct the OwnerApprovalHandler, or None when it can't place orders.
+
+    The order-placing broker follows the env trading mode (``BYBIT_TRADING_MODE``):
+    PAPER/LIVE give a real BybitBroker; SHADOW has no broker, so approvals can't
+    place and the handler is disabled (a warning is logged).
+    """
+    import os
+
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig
+    from crypto_signal_bot.platform.execution.bybit_broker import build_broker
+    from crypto_signal_bot.platform.execution.engine import ExecutionEngine
+    from crypto_signal_bot.platform.notify.owner import OwnerApprovalHandler
+    from crypto_signal_bot.platform.notify.pending import PendingSignalStore
+    from crypto_signal_bot.platform.risk_control.control import (
+        ProductionRiskControl,
+        RiskControlConfig,
+    )
+    from crypto_signal_bot.platform.risk_control.state import RiskStateStore
+
+    if not owner_id:
+        return None
+    cfg = BybitConfig.from_env()
+    broker = build_broker(cfg)  # None for SHADOW
+    if broker is None:
+        logger.warning(
+            "Owner semi-auto approval disabled: BYBIT_TRADING_MODE={} has no broker "
+            "(set paper/live to place orders on Accept).", cfg.mode.value,
+        )
+        return None
+    return OwnerApprovalHandler(
+        owner_id=owner_id,
+        pending=PendingSignalStore(paths.pending_path),
+        engine=ExecutionEngine(broker),
+        risk_control=ProductionRiskControl(RiskControlConfig.from_env()),
+        risk_state=RiskStateStore(os.getenv("RISK_STATE_PATH", "data/risk_state.json")),
+        ledger_store=paths.ledger_store,
+        prefs=paths.prefs,
+    )
 
 
 def _add_symbol_arg(sub: argparse.ArgumentParser) -> None:

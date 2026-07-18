@@ -146,3 +146,16 @@ def test_no_active_subscribers_is_a_noop(tmp_path):
     res = SubscriberBroadcaster(client, subs).broadcast([_intent("BTCUSDT", 0.9)])
     assert res == res.__class__() or (res.sent == 0 and res.recipients == 0)
     assert client.sent == []
+
+
+def test_broadcast_excludes_given_chats(tmp_path):
+    # The owner is kept out of the subscriber fan-out (they get the buttoned copy).
+    subs = _subs(tmp_path)
+    subs.grant("7", 30, "VIP")   # owner, also happens to hold a subscription
+    subs.grant("8", 30, "PRO")   # a real subscriber
+    client = _FakeClient()
+    res = SubscriberBroadcaster(client, subs).broadcast(
+        [_intent("BTCUSDT", 0.9)], exclude={"7"}
+    )
+    assert {m["chat_id"] for m in client.sent} == {"8"}
+    assert res.recipients == 1 and res.sent == 1

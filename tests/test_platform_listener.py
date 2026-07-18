@@ -180,6 +180,16 @@ def test_back_button_returns_to_greeting(tmp_path):
     assert client.answered == [{"id": "cb1", "text": ""}]
 
 
+def test_help_returns_help_text_localized(tmp_path):
+    listener, client, prefs = _listener(tmp_path)
+    prefs.set("30", "ru")
+    listener.handle_update(_message(30, "/help"))
+    assert client.sent[-1]["text"] == t("ru", "help")
+    # available to everyone (no subscription needed)
+    listener.handle_update(_message(31, "/help"))
+    assert client.sent[-1]["text"] == t("en", "help")
+
+
 def test_non_command_message_ignored(tmp_path):
     listener, client, _ = _listener(tmp_path)
     listener.handle_update(_message(1, "hello there"))
@@ -436,7 +446,7 @@ def test_start_sets_base_command_menu_scoped_to_chat(tmp_path):
     listener, client, _, _ = _tier_listener(tmp_path)
     listener.handle_update(_msg_from(500, "/start"))
     names, scope = _last_menu(client)
-    assert names == ["start", "language", "subscribe"]  # base only, no sub
+    assert names == ["start", "language", "subscribe", "help"]  # base only, no sub
     assert scope == {"type": "chat", "chat_id": "500"}
 
 
@@ -454,7 +464,7 @@ def test_vip_menu_includes_stats_and_risk(tmp_path):
     subs.grant("500", 30, "VIP")
     listener.handle_update(_msg_from(500, "/start"))
     names, _ = _last_menu(client)
-    assert names == ["start", "language", "subscribe", "stats", "risk"]
+    assert names == ["start", "language", "subscribe", "help", "stats", "risk"]
 
 
 def test_pro_menu_includes_stats_but_not_risk(tmp_path):
@@ -462,7 +472,7 @@ def test_pro_menu_includes_stats_but_not_risk(tmp_path):
     subs.grant("500", 30, "PRO")
     listener.handle_update(_msg_from(500, "/start"))
     names, _ = _last_menu(client)
-    assert names == ["start", "language", "subscribe", "stats"]
+    assert names == ["start", "language", "subscribe", "help", "stats"]
 
 
 def test_admin_grant_refreshes_target_command_menu(tmp_path):
@@ -472,3 +482,19 @@ def test_admin_grant_refreshes_target_command_menu(tmp_path):
     names, scope = _last_menu(client)
     assert scope == {"type": "chat", "chat_id": "500"}
     assert "stats" in names and "risk" in names
+
+
+def test_admin_menu_includes_admin_commands(tmp_path):
+    listener, client, _, _ = _tier_listener(tmp_path)
+    listener.handle_update(_msg_from(ADMIN, "/start"))
+    names, scope = _last_menu(client)
+    assert scope == {"type": "chat", "chat_id": ADMIN}
+    assert names[-4:] == ["grant", "revoke", "subs", "users"]
+
+
+def test_regular_user_menu_excludes_admin_commands(tmp_path):
+    listener, client, subs, _ = _tier_listener(tmp_path)
+    subs.grant("500", 30, "VIP")  # even a VIP is not the admin
+    listener.handle_update(_msg_from(500, "/start"))
+    names, _ = _last_menu(client)
+    assert not ({"grant", "revoke", "subs", "users"} & set(names))

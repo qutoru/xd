@@ -43,7 +43,7 @@ def _semi_auto_enabled() -> bool:
     return _env_flag("TRADE_SEMI_AUTO")
 
 
-def push_owner_approvals(intents, *, owner_id, pending, client, prefs=None) -> int:
+def push_owner_approvals(intents, *, owner_id, pending, client, prefs=None, risk_prefs=None) -> int:
     """Persist each intent as pending and push the owner an Accept/Ignore message.
 
     Semi-auto mode: the pipeline runs with execution disabled and hands each
@@ -60,10 +60,13 @@ def push_owner_approvals(intents, *, owner_id, pending, client, prefs=None) -> i
 
     formatter = TelegramFormatter()
     lang = prefs.get(owner_id) if prefs is not None else DEFAULT_LANGUAGE
+    # The owner holds all VIP privileges, so their signal carries the VIP-only
+    # recommended risk-per-trade line (from the owner's personal /risk level).
+    owner_risk = risk_prefs.get(owner_id) if risk_prefs is not None else None
     pushed = 0
     for intent in intents:
         signal = pending.add(intent, chat_id=owner_id)
-        text = f"{formatter.format(intent, lang)}\n\n{t(lang, 'owner_prompt')}"
+        text = f"{formatter.format(intent, lang, risk_level=owner_risk)}\n\n{t(lang, 'owner_prompt')}"
         # The Accept/Ignore buttons attach only when the recipient IS the owner
         # (owner_only_keyboard returns None otherwise), so they can never be shown
         # to any other user — the message here is always addressed to the owner.
@@ -194,7 +197,8 @@ def run_trade(
 
 
 def deliver_semi_auto(
-    intents, *, owner_id, client, pending, subs, prefs=None, broadcast_subscribers=True
+    intents, *, owner_id, client, pending, subs, prefs=None, risk_prefs=None,
+    broadcast_subscribers=True,
 ):
     """Deliver one cycle's signals: buttoned approvals to the owner, plain to subs.
 
@@ -210,11 +214,12 @@ def deliver_semi_auto(
     owner_pushed = 0
     if owner_id:
         owner_pushed = push_owner_approvals(
-            intents, owner_id=owner_id, pending=pending, client=client, prefs=prefs
+            intents, owner_id=owner_id, pending=pending, client=client,
+            prefs=prefs, risk_prefs=risk_prefs,
         )
     if not broadcast_subscribers:
         return owner_pushed, BroadcastResult()
-    broadcaster = SubscriberBroadcaster(client, subs, prefs=prefs)
+    broadcaster = SubscriberBroadcaster(client, subs, prefs=prefs, risk_prefs=risk_prefs)
     result = broadcaster.broadcast(intents, exclude={owner_id} if owner_id else None)
     return owner_pushed, result
 
@@ -232,11 +237,13 @@ def _push_semi_auto(result) -> None:
     from crypto_signal_bot.config import (
         TELEGRAM_PENDING_PATH,
         TELEGRAM_PREFS_PATH,
+        TELEGRAM_RISK_PREFS_PATH,
         TELEGRAM_SUBS_PATH,
     )
     from crypto_signal_bot.platform.notify.listener import RequestsBotClient
     from crypto_signal_bot.platform.notify.pending import PendingSignalStore
     from crypto_signal_bot.platform.notify.prefs import LanguagePrefsStore
+    from crypto_signal_bot.platform.notify.riskprefs import RiskPrefsStore
     from crypto_signal_bot.platform.notify.subscriptions import SubscriptionStore
 
     # Owner buttons are always delivered in semi-auto; the plain subscriber fan-out
@@ -250,6 +257,7 @@ def _push_semi_auto(result) -> None:
         pending=PendingSignalStore(TELEGRAM_PENDING_PATH),
         subs=SubscriptionStore(TELEGRAM_SUBS_PATH),
         prefs=LanguagePrefsStore(TELEGRAM_PREFS_PATH),
+        risk_prefs=RiskPrefsStore(TELEGRAM_RISK_PREFS_PATH),
         broadcast_subscribers=broadcast_subs,
     )
     logger.success(

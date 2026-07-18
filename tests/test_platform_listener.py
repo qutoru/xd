@@ -498,3 +498,20 @@ def test_regular_user_menu_excludes_admin_commands(tmp_path):
     listener.handle_update(_msg_from(500, "/start"))
     names, _ = _last_menu(client)
     assert not ({"grant", "revoke", "subs", "users"} & set(names))
+
+
+def test_owner_has_vip_entitlements_without_subscription(tmp_path):
+    from crypto_signal_bot.platform.notify.plans import ENTITLEMENTS, Tier
+
+    listener, _, _, _ = _tier_listener(tmp_path)  # ADMIN has NO subscription granted
+    ent = listener._entitlements(ADMIN)
+    assert ent == ENTITLEMENTS[Tier.VIP]           # owner == full VIP
+    assert ent.stats and ent.custom_risk
+    assert listener._entitlements("12345") is None  # a non-owner still gets nothing
+
+
+def test_owner_menu_includes_vip_commands(tmp_path):
+    listener, client, _, _ = _tier_listener(tmp_path)  # ADMIN, no subscription
+    listener.handle_update(_msg_from(ADMIN, "/start"))
+    names, _ = _last_menu(client)
+    assert {"stats", "risk"} <= set(names)  # VIP commands unlocked for the owner

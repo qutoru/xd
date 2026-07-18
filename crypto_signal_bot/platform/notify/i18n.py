@@ -134,6 +134,13 @@ _CATALOG: dict[str, dict[str, str]] = {
         "take_profit": "Take Profit",
         "stop_loss": "Stop Loss",
         "confidence": "Confidence",
+        # Coarse signal-strength tier (relative model conviction, not a probability).
+        "signal_strength": "Signal strength",
+        "strength_low": "Weak",
+        "strength_medium": "Medium",
+        "strength_high": "Strong",
+        # VIP/owner-only: recommended risk per trade, from the personal /risk level.
+        "risk_per_trade": "Risk per trade",
         # Owner-only semi-automatic approval (invisible to other users).
         "owner_prompt": "Place this order?",
         "owner_accept": "✅ Accept",
@@ -271,6 +278,13 @@ _CATALOG: dict[str, dict[str, str]] = {
         "take_profit": "Тейк-профит",
         "stop_loss": "Стоп-лосс",
         "confidence": "Уверенность",
+        # Грубый тир силы сигнала (относительная убеждённость модели, не вероятность).
+        "signal_strength": "Сила сигнала",
+        "strength_low": "Слабая",
+        "strength_medium": "Средняя",
+        "strength_high": "Сильная",
+        # Только VIP/owner: рекомендуемый риск на сделку из личного уровня /risk.
+        "risk_per_trade": "Риск на сделку",
         # Приватный полуавтоматический режим владельца (невидим для других).
         "owner_prompt": "Выставить ордер?",
         "owner_accept": "✅ Принять",

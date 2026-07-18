@@ -159,3 +159,19 @@ def test_broadcast_excludes_given_chats(tmp_path):
     )
     assert {m["chat_id"] for m in client.sent} == {"8"}
     assert res.recipients == 1 and res.sent == 1
+
+
+def test_vip_gets_risk_line_lower_tiers_do_not(tmp_path):
+    from crypto_signal_bot.platform.notify.riskprefs import RiskPrefsStore
+
+    subs = _subs(tmp_path)
+    subs.grant("vip", 30, "VIP")
+    subs.grant("pro", 30, "PRO")
+    rp = RiskPrefsStore(tmp_path / "risk.json")
+    rp.set("vip", "high")
+    client = _FakeClient()
+    SubscriberBroadcaster(client, subs, risk_prefs=rp).broadcast([_intent("BTCUSDT", 0.9)])
+
+    by_chat = {m["chat_id"]: m["text"] for m in client.sent}
+    assert "Risk per trade" in by_chat["vip"] and "3% (High)" in by_chat["vip"]
+    assert "Risk per trade" not in by_chat["pro"]  # only VIP (custom_risk) gets it

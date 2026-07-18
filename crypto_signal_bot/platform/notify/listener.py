@@ -218,9 +218,13 @@ class TelegramListener:
     def _entitlements(self, chat_id: str) -> Entitlements | None:
         """Entitlements for a chat's *active* subscription, else None.
 
-        An active subscription with an unrecognised plan label falls back to the
-        base (START) tier, so richer features stay gated to explicit PRO/VIP.
+        The owner (== ``admin_id``) always holds full VIP entitlements, regardless
+        of any subscription. Otherwise an active subscription with an unrecognised
+        plan label falls back to the base (START) tier, so richer features stay
+        gated to explicit PRO/VIP.
         """
+        if self._admin_id is not None and str(chat_id) == self._admin_id:
+            return ENTITLEMENTS[Tier.VIP]
         if self._subs is None:
             return None
         sub = self._subs.get(chat_id)

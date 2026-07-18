@@ -27,8 +27,26 @@ def test_format_exact_futures_layout():
         "\nEntry\n105400\n"
         "\nTake Profit\n108100 (+2.6%)\n"
         "\nStop Loss\n104200 (-1.1%)\n"
-        "\nConfidence\n78%"
+        "\nSignal strength\n★★★ Strong"
     )
+
+
+def test_strength_tier_buckets():
+    fmt = TelegramFormatter()
+    assert "★★★ Strong" in fmt.format(_intent(confidence=0.9))
+    assert "★★☆ Medium" in fmt.format(_intent(confidence=0.5))
+    assert "★☆☆ Weak" in fmt.format(_intent(confidence=0.1))
+    # No false-precision percentage is shown anymore.
+    assert "%" not in fmt.format(_intent(confidence=0.9)).split("Signal strength")[1]
+
+
+def test_risk_field_only_when_level_given():
+    fmt = TelegramFormatter()
+    assert "Risk per trade" not in fmt.format(_intent())            # non-VIP: no risk line
+    msg = fmt.format(_intent(), risk_level="medium")               # VIP/owner
+    assert "\nRisk per trade\n2% (Medium)" in msg
+    assert "\nRisk per trade\n1% (Low)" in fmt.format(_intent(), risk_level="low")
+    assert "\nRisk per trade\n3% (High)" in fmt.format(_intent(), risk_level="high")
 
 
 def test_format_short_side_signs():
@@ -49,7 +67,7 @@ def test_format_russian_localizes_labels_only():
         "\nВход\n105400\n"
         "\nТейк-профит\n108100 (+2.6%)\n"
         "\nСтоп-лосс\n104200 (-1.1%)\n"
-        "\nУверенность\n78%"
+        "\nСила сигнала\n★★★ Сильная"
     )
 
 

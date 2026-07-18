@@ -66,6 +66,7 @@ class SubscriberBroadcaster:
         *,
         formatter: TelegramFormatter | None = None,
         prefs: LanguagePrefsStore | None = None,
+        risk_prefs=None,
         beta_strategies: frozenset[str] = frozenset(),
         default_tier: Tier = Tier.START,
     ) -> None:
@@ -73,6 +74,9 @@ class SubscriberBroadcaster:
         self._subs = subscriptions
         self._formatter = formatter or TelegramFormatter()
         self._prefs = prefs
+        # Personal risk level store (VIP): drives the recommended risk-per-trade
+        # line, shown only to subscribers whose tier has custom_risk (VIP).
+        self._risk_prefs = risk_prefs
         # Strategy names treated as early-access; withheld from non-VIP tiers.
         self._beta = frozenset(beta_strategies)
         # Tier applied to an active subscriber whose plan label is unrecognised
@@ -123,8 +127,13 @@ class SubscriberBroadcaster:
         for sub in active:
             ent = self._entitlements(sub)
             lang = self._language(sub.chat_id)
+            # VIP-only recommended risk-per-trade, from the subscriber's /risk level.
+            risk_level = (
+                self._risk_prefs.get(sub.chat_id)
+                if ent.custom_risk and self._risk_prefs is not None else None
+            )
             for intent in self._visible(intents, ent):
-                text = self._formatter.format(intent, lang)
+                text = self._formatter.format(intent, lang, risk_level=risk_level)
                 try:
                     self._client.send_message(chat_id=sub.chat_id, text=text)
                     sent += 1

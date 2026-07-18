@@ -19,6 +19,24 @@ def _pct(intent: TradeIntent, level: float) -> float:
     return sign * (level / intent.entry - 1.0)
 
 
+# Coarse tiers for the signal-strength field. ``confidence`` is a relative,
+# max-normalized conviction proxy (NOT a probability), so it is shown as a stars
+# tier rather than a false-precision percentage.
+_STRENGTH_STARS = {"low": "★☆☆", "medium": "★★☆", "high": "★★★"}
+
+# Recommended risk per trade (% of deposit) for the VIP/owner personal /risk level.
+_RISK_PCT = {"low": 1, "medium": 2, "high": 3}
+
+
+def _strength_tier(confidence: float) -> str:
+    """Bucket a [0, 1] conviction proxy into low / medium / high."""
+    if confidence >= 0.66:
+        return "high"
+    if confidence >= 0.33:
+        return "medium"
+    return "low"
+
+
 class TelegramFormatter:
     """Renders TradeIntents into Telegram messages (exact futures layout).
 
@@ -27,8 +45,19 @@ class TelegramFormatter:
     original rendering is preserved byte-for-byte.
     """
 
-    def format(self, intent: TradeIntent, lang: str = DEFAULT_LANGUAGE) -> str:
-        """Telegram message for one intent (no leverage/reason/RR)."""
+    def format(
+        self,
+        intent: TradeIntent,
+        lang: str = DEFAULT_LANGUAGE,
+        *,
+        risk_level: str | None = None,
+    ) -> str:
+        """Telegram message for one intent.
+
+        ``risk_level`` (``low``/``medium``/``high``), when supplied, appends the
+        VIP/owner-only recommended risk-per-trade line. Callers pass it only for
+        VIP subscribers and the owner, so the field stays gated to those tiers.
+        """
         side_key = "side_long" if intent.side == Side.BUY else "side_short"
         parts = [f"{intent.symbol} | {t(lang, side_key)}"]
         if intent.timestamp is not None:
@@ -42,5 +71,10 @@ class TelegramFormatter:
             parts += ["", t(lang, "stop_loss"),
                       f"{intent.stop_loss:g} ({_pct(intent, intent.stop_loss):+.1%})"]
         if intent.confidence is not None:
-            parts += ["", t(lang, "confidence"), f"{intent.confidence:.0%}"]
+            tier = _strength_tier(intent.confidence)
+            parts += ["", t(lang, "signal_strength"),
+                      f"{_STRENGTH_STARS[tier]} {t(lang, f'strength_{tier}')}"]
+        if risk_level in _RISK_PCT:
+            parts += ["", t(lang, "risk_per_trade"),
+                      f"{_RISK_PCT[risk_level]}% ({t(lang, f'risk_{risk_level}')})"]
         return "\n".join(parts)

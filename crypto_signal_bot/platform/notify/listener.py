@@ -135,6 +135,8 @@ class TelegramListener:
         ledger_store: AccountingStore | None = None,
         risk_prefs: RiskPrefsStore | None = None,
         owner_handler=None,
+        outcome_reporter=None,
+        signal_driver=None,
     ) -> None:
         self._client = client
         self._prefs = prefs
@@ -146,6 +148,14 @@ class TelegramListener:
         # Owner-only semi-auto approval (Accept/Ignore on pushed signals). Optional
         # and owner-gated inside the handler, so it stays invisible to other users.
         self._owner_handler = owner_handler
+        # Owner-only trade-outcome reporter: polled once per long-poll tick to
+        # announce WIN/LOSE when a position closes on the venue. Optional; None keeps
+        # the loop identical to before.
+        self._outcome_reporter = outcome_reporter
+        # In-process signal driver: generates ALX signals on a schedule and releases
+        # them one per minute (owner buttons + subscriber broadcast). Ticked once per
+        # long-poll iteration. Optional; None keeps the loop identical to before.
+        self._signal_driver = signal_driver
 
     # -- individual update handling ---------------------------------------
 
@@ -465,6 +475,26 @@ class TelegramListener:
         offset: int | None = None
         while True:
             offset = self.poll_once(offset, timeout=timeout)
+            self._drive_signals()
+            self._report_outcomes()
+
+    def _report_outcomes(self) -> None:
+        """Announce any newly-closed trades (best-effort; never breaks the loop)."""
+        if self._outcome_reporter is None:
+            return
+        try:
+            self._outcome_reporter.poll()
+        except Exception as exc:  # a reporter failure must not stop long-polling
+            logger.error("Outcome reporter tick failed: {}", exc)
+
+    def _drive_signals(self) -> None:
+        """Advance the signal driver (generate + paced release; best-effort)."""
+        if self._signal_driver is None:
+            return
+        try:
+            self._signal_driver.tick()
+        except Exception as exc:  # a driver failure must not stop long-polling
+            logger.error("Signal driver tick failed: {}", exc)
 
 
 @dataclass

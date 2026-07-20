@@ -86,6 +86,10 @@ class FakeSession:
         self.cancels.append(kw)
         return {"retCode": 0, "result": {"list": []}}
 
+    def set_leverage(self, **kw):
+        self.calls.append(("set_leverage", kw))
+        return {"retCode": getattr(self, "_lev_ret", 0), "retMsg": "OK"}
+
 
 def _cfg(mode=TradingMode.LIVE):
     return BybitConfig(api_key="k", api_secret="s", testnet=True, mode=mode)
@@ -107,6 +111,37 @@ def test_config_from_env(monkeypatch):
     cfg = BybitConfig.from_env()
     assert cfg.api_key == "k" and cfg.api_secret == "s"
     assert cfg.testnet is False and cfg.mode is TradingMode.LIVE and cfg.is_live
+
+
+def test_config_from_env_prefers_testnet_keys_when_testnet(monkeypatch):
+    monkeypatch.setenv("BYBIT_API_KEY", "main_k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "main_s")
+    monkeypatch.setenv("BYBIT_TESTNET_API_KEY", "test_k")
+    monkeypatch.setenv("BYBIT_TESTNET_API_SECRET", "test_s")
+    monkeypatch.setenv("BYBIT_TESTNET", "true")
+    cfg = BybitConfig.from_env()
+    assert cfg.testnet is True
+    assert cfg.api_key == "test_k" and cfg.api_secret == "test_s"
+
+
+def test_config_from_env_testnet_falls_back_to_base_keys(monkeypatch):
+    monkeypatch.setenv("BYBIT_API_KEY", "main_k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "main_s")
+    monkeypatch.delenv("BYBIT_TESTNET_API_KEY", raising=False)
+    monkeypatch.delenv("BYBIT_TESTNET_API_SECRET", raising=False)
+    monkeypatch.setenv("BYBIT_TESTNET", "true")
+    cfg = BybitConfig.from_env()
+    assert cfg.api_key == "main_k" and cfg.api_secret == "main_s"
+
+
+def test_config_from_env_mainnet_ignores_testnet_keys(monkeypatch):
+    monkeypatch.setenv("BYBIT_API_KEY", "main_k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "main_s")
+    monkeypatch.setenv("BYBIT_TESTNET_API_KEY", "test_k")
+    monkeypatch.setenv("BYBIT_TESTNET_API_SECRET", "test_s")
+    monkeypatch.setenv("BYBIT_TESTNET", "false")
+    cfg = BybitConfig.from_env()
+    assert cfg.api_key == "main_k" and cfg.api_secret == "main_s"
 
 
 def test_config_validate_live_requires_credentials():
@@ -206,6 +241,33 @@ def test_nonzero_retcode_becomes_reject():
     assert res.status is OrderStatus.REJECTED and res.message == "err"
 
 
+# --- leverage + one-way positionIdx (E2E-critical) --------------------------
+def test_orders_carry_one_way_position_idx():
+    s = FakeSession()
+    BybitBroker(_cfg(), session=s).submit(OrderRequest("BTCUSDT", Side.BUY, 50.0))
+    assert _placed(s, "Market")[0]["positionIdx"] == 0  # one-way
+
+
+def test_set_leverage_ok_and_benign_and_error():
+    ok = FakeSession()
+    assert BybitBroker(_cfg(), session=ok).set_leverage("BTCUSDT", 3) is True
+    assert ("set_leverage", {"category": "linear", "symbol": "BTCUSDT",
+                             "buyLeverage": "3", "sellLeverage": "3"}) in ok.calls
+
+    benign = FakeSession(); benign._lev_ret = 110043  # "leverage not modified"
+    assert BybitBroker(_cfg(), session=benign).set_leverage("BTCUSDT") is True
+
+    bad = FakeSession(); bad._lev_ret = 10001
+    assert BybitBroker(_cfg(), session=bad).set_leverage("BTCUSDT") is False
+
+
+def test_config_rejects_bad_leverage_and_position_idx():
+    with pytest.raises(ValueError):
+        BybitConfig(mode=TradingMode.PAPER, leverage=0.5).validate()
+    with pytest.raises(ValueError):
+        BybitConfig(mode=TradingMode.PAPER, position_idx=3).validate()
+
+
 # --- live portfolio state ---------------------------------------------------
 def test_live_portfolio_state_reads_wallet_and_positions():
     broker = BybitBroker(_cfg(), session=FakeSession(position_size=0.5))
@@ -298,3 +360,73 @@ def test_cancel_open_orders_swallows_errors_and_does_not_abort():
 
     # must NOT raise (best-effort hygiene)
     BybitBroker(_cfg(), session=_Boom()).cancel_open_orders("BTCUSDT")
+
+
+# --- realized PnL is sourced from the closed-PnL feed, not the execution list ----
+class _FillsSession(FakeSession):
+    """Serves an entry + TP-close execution, plus a closed-PnL record for the close.
+
+    Mirrors the real venue: the execution rows carry closedSize but no realized PnL;
+    the closed-PnL feed carries avgEntry/avgExit for the closing order. ``pnl_rows``
+    lets a test omit the closed-PnL record to simulate eventual-consistency lag.
+    """
+
+    def __init__(self, *, exec_rows, pnl_rows):
+        super().__init__()
+        self._exec_rows = exec_rows
+        self._pnl_rows = pnl_rows
+
+    def get_executions(self, **kw):
+        self.calls.append(("get_executions", kw))
+        return {"retCode": 0, "result": {"list": self._exec_rows}}
+
+    def get_closed_pnl(self, **kw):
+        self.calls.append(("get_closed_pnl", kw))
+        return {"retCode": 0, "result": {"list": self._pnl_rows}}
+
+
+def _exec(execId, side, qty, price, *, closed=0.0, link="", order="o1"):
+    return {"execType": "Trade", "execId": execId, "orderId": order, "orderLinkId": link,
+            "symbol": "XRPUSDT", "side": side, "execQty": str(qty), "execPrice": str(price),
+            "execFee": "0.1", "execTime": "1690000000000", "closedSize": str(closed)}
+
+
+def test_get_fills_takes_gross_realized_from_closed_pnl():
+    # Entry buy @1.1144, TP sell @1.1422 closing 298.9 — a real +8.3 profit that the
+    # execution feed reports as zero PnL. The closed-PnL record supplies the prices,
+    # and the broker must book the GROSS round-trip (size*(exit-entry)), fees separate.
+    s = _FillsSession(
+        exec_rows=[
+            _exec("e1", "Buy", 298.9, 1.1144, order="entry-o"),
+            _exec("e2", "Sell", 298.9, 1.1422, closed=298.9, link="p-XRPUSDT-x-tp", order="tp-o"),
+        ],
+        pnl_rows=[{"orderId": "tp-o", "side": "Sell", "closedSize": "298.9",
+                   "avgEntryPrice": "1.1144", "avgExitPrice": "1.1422", "closedPnl": "8.0"}],
+    )
+    fills = BybitBroker(_cfg(), session=s).get_fills()
+    by_exec = {f.exec_id: f for f in fills}
+    assert by_exec["e1"].realized_pnl == pytest.approx(0.0)      # entry realizes nothing
+    assert by_exec["e2"].realized_pnl == pytest.approx(298.9 * (1.1422 - 1.1144))
+    assert by_exec["e2"].realized_pnl > 0                         # a TP win, not a loss
+
+
+def test_get_fills_holds_back_close_missing_closed_pnl():
+    # If the closed-PnL record has not landed yet, the close is NOT booked at zero
+    # (which would freeze a wrong loss via exec_id de-dup): it is skipped for now.
+    s = _FillsSession(
+        exec_rows=[_exec("e2", "Sell", 298.9, 1.1422, closed=298.9, order="tp-o")],
+        pnl_rows=[],
+    )
+    fills = BybitBroker(_cfg(), session=s).get_fills()
+    assert fills == []
+
+
+def test_get_fills_short_close_realizes_positive_when_exit_below_entry():
+    # A Buy close flattens a short: profit when exit < entry -> gross must be positive.
+    s = _FillsSession(
+        exec_rows=[_exec("e2", "Buy", 100.0, 0.90, closed=100.0, order="sl-o")],
+        pnl_rows=[{"orderId": "sl-o", "side": "Buy", "closedSize": "100",
+                   "avgEntryPrice": "1.00", "avgExitPrice": "0.90", "closedPnl": "10"}],
+    )
+    fills = BybitBroker(_cfg(), session=s).get_fills()
+    assert fills[0].realized_pnl == pytest.approx(100.0 * (1.00 - 0.90))

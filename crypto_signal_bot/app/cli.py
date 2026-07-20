@@ -215,23 +215,51 @@ def cmd_bot(args: argparse.Namespace) -> int:
 
     prefs = LanguagePrefsStore(TELEGRAM_PREFS_PATH)
     ledger_store = AccountingStore(TELEGRAM_LEDGER_PATH)
-    # Owner-only semi-auto approval: build it only when an owner (== admin) and a
-    # broker mode exist. Owner == TELEGRAM_ADMIN_ID; the whole surface is owner-gated
-    # inside the handler, so it stays invisible and inert for every other user.
+    subs = SubscriptionStore(TELEGRAM_SUBS_PATH)
+    risk_prefs = RiskPrefsStore(TELEGRAM_RISK_PREFS_PATH)
+    client = RequestsBotClient(token)
+
+    # The mode-selected Bybit broker (None for SHADOW), shared by the owner approval
+    # handler (places orders on Accept) and the outcome reporter (announces WIN/LOSE
+    # on close), so both run on one Bybit session.
+    from crypto_signal_bot.platform.execution.bybit_broker import build_broker
+    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig
+
+    cfg = BybitConfig.from_env()
+    broker = build_broker(cfg)  # None for SHADOW
+    if broker is None:
+        logger.warning(
+            "Owner semi-auto + outcome reports disabled: BYBIT_TRADING_MODE={} has no "
+            "broker (set paper/live to place orders and report closes).", cfg.mode.value,
+        )
+
+    # Owner-only semi-auto approval: only when an owner (== admin) and a broker exist.
+    # Owner == TELEGRAM_ADMIN_ID; the whole surface is owner-gated inside the handler,
+    # so it stays invisible and inert for every other user.
     owner_handler = _build_owner_handler(
-        admin_id or None, PendingPaths(TELEGRAM_PENDING_PATH, prefs, ledger_store)
+        admin_id or None, PendingPaths(TELEGRAM_PENDING_PATH, prefs, ledger_store), broker
+    )
+    # Owner-only WIN/LOSE reporter for closed trades (polled once per long-poll tick).
+    outcome_reporter = _build_outcome_reporter(
+        admin_id or None, broker, ledger_store, client, prefs
+    )
+    # In-process signal driver: starting the bot self-drives ALX generation and
+    # paced delivery (1 signal/min) — no separate manual `trade` run needed.
+    signal_driver = _build_signal_driver(
+        admin_id or None, client, prefs, subs, risk_prefs, TELEGRAM_PENDING_PATH
     )
 
-    client = RequestsBotClient(token)
     listener = TelegramListener(
         client,
         prefs,
-        subscriptions=SubscriptionStore(TELEGRAM_SUBS_PATH),
+        subscriptions=subs,
         users=UsersStore(TELEGRAM_USERS_PATH),
         admin_id=admin_id or None,
         ledger_store=ledger_store,
-        risk_prefs=RiskPrefsStore(TELEGRAM_RISK_PREFS_PATH),
+        risk_prefs=risk_prefs,
         owner_handler=owner_handler,
+        outcome_reporter=outcome_reporter,
+        signal_driver=signal_driver,
     )
     listener.run_forever(timeout=args.poll_timeout)
     return 0
@@ -246,17 +274,15 @@ class PendingPaths:
         self.ledger_store = ledger_store
 
 
-def _build_owner_handler(owner_id, paths: "PendingPaths"):
+def _build_owner_handler(owner_id, paths: "PendingPaths", broker):
     """Construct the OwnerApprovalHandler, or None when it can't place orders.
 
-    The order-placing broker follows the env trading mode (``BYBIT_TRADING_MODE``):
-    PAPER/LIVE give a real BybitBroker; SHADOW has no broker, so approvals can't
-    place and the handler is disabled (a warning is logged).
+    ``broker`` is the mode-selected Bybit broker (None for SHADOW). Without an owner
+    or a broker, approvals cannot place an order, so the handler is disabled (the
+    caller has already logged the SHADOW warning).
     """
     import os
 
-    from crypto_signal_bot.platform.execution.bybit_config import BybitConfig
-    from crypto_signal_bot.platform.execution.bybit_broker import build_broker
     from crypto_signal_bot.platform.execution.engine import ExecutionEngine
     from crypto_signal_bot.platform.notify.owner import OwnerApprovalHandler
     from crypto_signal_bot.platform.notify.pending import PendingSignalStore
@@ -266,15 +292,7 @@ def _build_owner_handler(owner_id, paths: "PendingPaths"):
     )
     from crypto_signal_bot.platform.risk_control.state import RiskStateStore
 
-    if not owner_id:
-        return None
-    cfg = BybitConfig.from_env()
-    broker = build_broker(cfg)  # None for SHADOW
-    if broker is None:
-        logger.warning(
-            "Owner semi-auto approval disabled: BYBIT_TRADING_MODE={} has no broker "
-            "(set paper/live to place orders on Accept).", cfg.mode.value,
-        )
+    if not owner_id or broker is None:
         return None
     return OwnerApprovalHandler(
         owner_id=owner_id,
@@ -284,6 +302,81 @@ def _build_owner_handler(owner_id, paths: "PendingPaths"):
         risk_state=RiskStateStore(os.getenv("RISK_STATE_PATH", "data/risk_state.json")),
         ledger_store=paths.ledger_store,
         prefs=paths.prefs,
+    )
+
+
+def _build_outcome_reporter(owner_id, broker, ledger_store, client, prefs):
+    """Construct the TradeOutcomeReporter, or None when closes can't be reported.
+
+    Needs an owner (the recipient) and a real broker (the fills feed). On first
+    activation it baselines any pre-existing closes so only trades that close *after*
+    the bot starts are announced.
+    """
+    if not owner_id or broker is None:
+        return None
+    from crypto_signal_bot.config import TELEGRAM_OUTCOMES_PATH
+    from crypto_signal_bot.platform.notify.outcomes import (
+        NotifiedOutcomeStore,
+        TradeOutcomeReporter,
+    )
+
+    reporter = TradeOutcomeReporter(
+        broker=broker,
+        ledger_store=ledger_store,
+        client=client,
+        chat_id=owner_id,
+        state=NotifiedOutcomeStore(TELEGRAM_OUTCOMES_PATH),
+        prefs=prefs,
+    )
+    seeded = reporter.seed_if_new()
+    if seeded:
+        logger.info(
+            "Outcome reporter: baselined {} pre-existing close(s) — not re-announced", seeded
+        )
+    return reporter
+
+
+def _build_signal_driver(owner_id, client, prefs, subs, risk_prefs, pending_path):
+    """Construct the in-process SignalDriver, or None when semi-auto is off.
+
+    Enabled only when ``TRADE_SEMI_AUTO`` is set and an owner exists — the same
+    condition under which signals are delivered to the owner. The driver runs one
+    ALX cycle every ``SIGNAL_CYCLE_INTERVAL_S`` (default daily; the first runs at
+    startup) and releases queued signals one every ``SIGNAL_RELEASE_INTERVAL_S``
+    (default 60s). Each release goes to the owner (buttoned) and, when
+    ``TRADE_BROADCAST_SUBSCRIBERS`` is set, to subscribers (plain).
+    """
+    import os
+
+    from crypto_signal_bot.app.trade_runner import (
+        compute_signals,
+        deliver_semi_auto,
+        _env_flag,
+    )
+    from crypto_signal_bot.platform.notify.driver import SignalDriver
+    from crypto_signal_bot.platform.notify.pending import PendingSignalStore
+
+    if not owner_id or not _env_flag("TRADE_SEMI_AUTO"):
+        return None
+
+    pending = PendingSignalStore(pending_path)
+    broadcast_subs = _env_flag("TRADE_BROADCAST_SUBSCRIBERS")
+    signal_names = tuple(s for s in os.getenv("SIGNAL_NAMES", "alx").split(",") if s)
+
+    def _source():
+        return compute_signals(signals=signal_names)
+
+    def _deliver(intent):
+        deliver_semi_auto(
+            [intent], owner_id=owner_id, client=client, pending=pending, subs=subs,
+            prefs=prefs, risk_prefs=risk_prefs, broadcast_subscribers=broadcast_subs,
+        )
+
+    return SignalDriver(
+        signal_source=_source,
+        deliver=_deliver,
+        cycle_interval_s=float(os.getenv("SIGNAL_CYCLE_INTERVAL_S", "86400")),
+        release_interval_s=float(os.getenv("SIGNAL_RELEASE_INTERVAL_S", "60")),
     )
 
 

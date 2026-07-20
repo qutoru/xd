@@ -139,6 +139,14 @@ class ExecutionEngine:
         notional = abs(intent.target_notional)
         close_side = _OPPOSITE[intent.side]
 
+        # The entry keeps a date-deterministic id: re-accepting the same symbol the
+        # same day collides on the orderLinkId and the venue rejects the duplicate,
+        # which is the idempotency guard against a double-open. The reduce-only
+        # brackets instead carry a per-placement token: unlike the entry they are
+        # meant to be re-placeable (an earlier accept may already have rested a
+        # ``-tp``/``-sl`` on the venue, and a date-stamped id would then be rejected
+        # as a duplicate — code 110072 — leaving the new position with NO stop-loss).
+        token = uuid.uuid4().hex[:8]
         orders = [
             OrderRequest(
                 symbol=intent.symbol,
@@ -157,7 +165,7 @@ class ExecutionEngine:
                     order_type=OrderType.LIMIT,
                     price=intent.take_profit,
                     reduce_only=True,
-                    client_id=f"{tag}-{intent.symbol}-{ts}-tp",
+                    client_id=f"{tag}-{intent.symbol}-{token}-tp",
                 )
             )
         if intent.stop_loss is not None:
@@ -169,7 +177,7 @@ class ExecutionEngine:
                     order_type=OrderType.STOP,
                     price=intent.stop_loss,
                     reduce_only=True,
-                    client_id=f"{tag}-{intent.symbol}-{ts}-sl",
+                    client_id=f"{tag}-{intent.symbol}-{token}-sl",
                 )
             )
         return orders

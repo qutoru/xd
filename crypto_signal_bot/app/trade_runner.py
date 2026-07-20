@@ -43,6 +43,78 @@ def _semi_auto_enabled() -> bool:
     return _env_flag("TRADE_SEMI_AUTO")
 
 
+def compute_signals(*, signals: Sequence[str], asof: pd.Timestamp | None = None, session=None):
+    """Run one ALX cycle without executing and return the quality-filtered signals.
+
+    The generation half of semi-auto, factored out so the in-process signal driver
+    (started with the bot) can produce signals itself. Builds the same pipeline as
+    ``run_trade`` but forces ``execute=False`` (the owner approves each entry by
+    hand), runs one cycle, and returns only the strongest ``SIGNAL_TOP_N`` signals
+    at or above ``SIGNAL_MIN_CONFIDENCE``. Delivery (owner buttons + subscriber
+    broadcast) is the caller's job — this places nothing and sends nothing.
+    """
+    cfg = BybitConfig.from_env()
+    symbols = parse_symbols(os.getenv("BYBIT_SYMBOLS"))
+    pipeline = build_trade_pipeline(
+        cfg, signals=signals, symbols=symbols, notifier=None, session=session
+    )
+    pipeline.execute = False  # semi-auto: signals only, owner places on Accept
+    result = pipeline.run_once(
+        asof if asof is not None else pd.Timestamp.now(tz="UTC").normalize()
+    )
+    top_n = int(os.getenv("SIGNAL_TOP_N", "5"))
+    min_conf = float(os.getenv("SIGNAL_MIN_CONFIDENCE", "0.0"))
+    candidates = _restrict_to_liquid(result.intents)
+    return select_quality_signals(candidates, top_n=top_n, min_confidence=min_conf)
+
+
+def _restrict_to_liquid(intents):
+    """Drop intents whose symbol is outside the ``TRADE_LIQUID_SYMBOLS`` allowlist.
+
+    ALX is cross-sectional and ranks across the full universe, but on some venues
+    (notably Bybit testnet) illiquid/exotic symbols have no fillable order book, so
+    a market entry is rejected by price-band protection (retCode 30208) and the TP/SL
+    brackets cascade. When ``TRADE_LIQUID_SYMBOLS`` is set (comma-separated), only
+    signals on those symbols are surfaced for execution — the full universe is still
+    used for ranking, only delivery is gated. An empty/unset value disables the
+    filter (every symbol is delivered), preserving prior behavior.
+    """
+    intents = list(intents)
+    allow = set(parse_symbols(os.getenv("TRADE_LIQUID_SYMBOLS")))
+    if not allow:
+        return intents
+    kept = [i for i in intents if getattr(i, "symbol", None) in allow]
+    if len(kept) != len(intents):
+        logger.info(
+            "Liquidity filter: {} of {} signal(s) within TRADE_LIQUID_SYMBOLS allowlist",
+            len(kept), len(intents),
+        )
+    return kept
+
+
+def _conviction(intent) -> float:
+    """Sort key for signal quality: the normalized confidence, or -inf if absent."""
+    return intent.confidence if intent.confidence is not None else float("-inf")
+
+
+def select_quality_signals(intents, *, top_n: int, min_confidence: float = 0.0):
+    """Keep only the strongest ``top_n`` intents, highest-conviction first.
+
+    ALX is cross-sectional: one rebalance proposes the whole book (roughly the
+    universe size), which is why raw semi-auto delivery pushed ~30 signals at once.
+    Semi-auto should instead surface only the highest-quality entries, so this ranks
+    by ``confidence`` (the normalized signal-strength proxy) descending, drops any
+    below ``min_confidence`` (an intent with no confidence never clears a floor of
+    0), and returns the top ``top_n``. ``top_n <= 0`` disables the cap (floor only).
+    """
+    ranked = sorted(
+        (i for i in intents if _conviction(i) >= min_confidence),
+        key=_conviction,
+        reverse=True,
+    )
+    return ranked if top_n <= 0 else ranked[:top_n]
+
+
 def push_owner_approvals(intents, *, owner_id, pending, client, prefs=None, risk_prefs=None) -> int:
     """Persist each intent as pending and push the owner an Accept/Ignore message.
 
@@ -160,7 +232,12 @@ def run_trade(
     """Run one daily cycle in the env-selected mode. Returns a process exit code."""
     cfg = BybitConfig.from_env()
     symbols = parse_symbols(os.getenv("BYBIT_SYMBOLS"))
-    notifier = TelegramNotifier.from_env()
+    semi_auto = _semi_auto_enabled()
+    # In semi-auto the owner receives one buttoned Accept/Ignore approval per
+    # signal; the plain pipeline notifier would double-send the same signals
+    # without buttons, so it is suppressed here (the buttoned owner push is the
+    # only delivery). It stays enabled in fully-auto modes.
+    notifier = None if semi_auto else TelegramNotifier.from_env()
 
     logger.info("Trade mode={} testnet={} symbols={}",
                 cfg.mode.value, cfg.testnet, symbols or "<mainnet top-N>")
@@ -173,7 +250,6 @@ def run_trade(
         logger.error("Configuration error, aborting before trading: {}", exc)
         return 2
 
-    semi_auto = _semi_auto_enabled()
     if semi_auto:
         # Owner approves each signal by hand; the pipeline must not auto-place any
         # order. It still computes the intents that are pushed for approval.
@@ -246,12 +322,25 @@ def _push_semi_auto(result) -> None:
     from crypto_signal_bot.platform.notify.riskprefs import RiskPrefsStore
     from crypto_signal_bot.platform.notify.subscriptions import SubscriptionStore
 
+    # Quality filter: instead of pushing the whole cross-sectional book, surface only
+    # the strongest ``SIGNAL_TOP_N`` signals (>= ``SIGNAL_MIN_CONFIDENCE``). Applied
+    # only to owner/subscriber delivery — the pipeline's book/shadow/accounting are
+    # untouched. SIGNAL_TOP_N=0 disables the cap (deliver every signal above the floor).
+    top_n = int(os.getenv("SIGNAL_TOP_N", "5"))
+    min_conf = float(os.getenv("SIGNAL_MIN_CONFIDENCE", "0.0"))
+    candidates = _restrict_to_liquid(result.intents)
+    selected = select_quality_signals(candidates, top_n=top_n, min_confidence=min_conf)
+    logger.info(
+        "Quality filter: delivering {} of {} signal(s) (top_n={}, min_confidence={})",
+        len(selected), len(result.intents), top_n, min_conf,
+    )
+
     # Owner buttons are always delivered in semi-auto; the plain subscriber fan-out
     # is a SEPARATE opt-in (TRADE_BROADCAST_SUBSCRIBERS) so enabling owner approvals
     # does not silently start messaging real subscribers on every scheduled run.
     broadcast_subs = _env_flag("TRADE_BROADCAST_SUBSCRIBERS")
     owner_pushed, bcast = deliver_semi_auto(
-        result.intents,
+        selected,
         owner_id=owner_id,
         client=RequestsBotClient(token),
         pending=PendingSignalStore(TELEGRAM_PENDING_PATH),

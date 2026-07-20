@@ -45,15 +45,35 @@ class BybitConfig:
     category: str = "linear"  # USDT perpetual futures
     recv_window: int = 5000
     paper_equity: float = 10_000.0  # simulated NAV used in PAPER mode
+    leverage: float = 1.0  # per-symbol leverage the broker sets before entries
+    position_idx: int = 0  # 0 = one-way mode (hedge mode uses 1/2 — unsupported)
 
     @classmethod
     def from_env(cls) -> BybitConfig:
-        """Build from ``BYBIT_*`` environment variables (safe defaults)."""
+        """Build from ``BYBIT_*`` environment variables (safe defaults).
+
+        When ``BYBIT_TESTNET`` is true, testnet credentials are read from
+        ``BYBIT_TESTNET_API_KEY`` / ``BYBIT_TESTNET_API_SECRET`` if set, so
+        testnet and mainnet keys can coexist and the venue is switched by the
+        single ``BYBIT_TESTNET`` flag. Testnet keys fall back to the base
+        ``BYBIT_API_KEY`` / ``BYBIT_API_SECRET`` when the testnet slots are empty.
+        """
+        testnet = _env_bool("BYBIT_TESTNET", True)
+        base_key = os.getenv("BYBIT_API_KEY", "")
+        base_secret = os.getenv("BYBIT_API_SECRET", "")
+        if testnet:
+            api_key = os.getenv("BYBIT_TESTNET_API_KEY") or base_key
+            api_secret = os.getenv("BYBIT_TESTNET_API_SECRET") or base_secret
+        else:
+            api_key = base_key
+            api_secret = base_secret
         return cls(
-            api_key=os.getenv("BYBIT_API_KEY", ""),
-            api_secret=os.getenv("BYBIT_API_SECRET", ""),
-            testnet=_env_bool("BYBIT_TESTNET", True),
+            api_key=api_key,
+            api_secret=api_secret,
+            testnet=testnet,
             mode=TradingMode(os.getenv("BYBIT_TRADING_MODE", "shadow").strip().lower()),
+            leverage=float(os.getenv("BYBIT_LEVERAGE", "1")),
+            position_idx=int(os.getenv("BYBIT_POSITION_IDX", "0")),
         )
 
     @property
@@ -71,3 +91,7 @@ class BybitConfig:
             raise ValueError("BybitConfig supports only linear (USDT perpetual) futures")
         if self.is_live and not (self.api_key and self.api_secret):
             raise ValueError("LIVE mode requires BYBIT_API_KEY and BYBIT_API_SECRET")
+        if self.leverage < 1.0:
+            raise ValueError("leverage must be >= 1.0")
+        if self.position_idx not in (0, 1, 2):
+            raise ValueError("position_idx must be 0 (one-way) or 1/2 (hedge)")

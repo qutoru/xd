@@ -26,7 +26,8 @@ class _DeadSession:
 
 
 def _env(monkeypatch, **kw):
-    for k in ("BYBIT_API_KEY", "BYBIT_API_SECRET", "BYBIT_TESTNET",
+    for k in ("BYBIT_API_KEY", "BYBIT_API_SECRET",
+              "BYBIT_TESTNET_API_KEY", "BYBIT_TESTNET_API_SECRET", "BYBIT_TESTNET",
               "BYBIT_TRADING_MODE", "BYBIT_SYMBOLS",
               "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
         monkeypatch.delenv(k, raising=False)

@@ -100,6 +100,35 @@ class BybitBroker(Broker):
             )
         return self._session
 
+    # Bybit retCodes that mean "your request was a no-op", not a failure:
+    #   110043 = leverage not modified (already at target)
+    #   110025 = position mode not modified
+    _BENIGN_RET = {110043, 110025}
+
+    def set_leverage(self, symbol: str, leverage: float | None = None) -> bool:
+        """Set per-symbol buy/sell leverage before entries (idempotent).
+
+        Returns True if leverage is now at the target (including the benign
+        "not modified" case), False on a real error. Never raises — a failure is
+        logged so the caller can decide whether to proceed. Only meaningful for
+        LIVE/PAPER (an exchange session); the ``leverage`` argument overrides the
+        configured default.
+        """
+        lev = self.config.leverage if leverage is None else leverage
+        try:
+            resp = self._get_session().set_leverage(
+                category=self.config.category, symbol=symbol,
+                buyLeverage=str(lev), sellLeverage=str(lev),
+            )
+            ret = int(resp.get("retCode", 0))
+            if ret == 0 or ret in self._BENIGN_RET:
+                return True
+            logger.error("set_leverage {} -> retCode={} {}", symbol, ret, resp.get("retMsg"))
+            return False
+        except Exception as exc:  # network/parse — surfaced, not swallowed silently
+            logger.error("set_leverage {} failed: {}", symbol, exc)
+            return False
+
     def check_connection(self) -> bool:
         """Ping the venue; True if reachable, False on any error."""
         try:
@@ -199,6 +228,10 @@ class BybitBroker(Broker):
             "qty": str(base_qty),
             "reduceOnly": request.reduce_only,
             "orderLinkId": request.client_id,
+            # 0 = one-way mode (the only mode we support). On a hedge-mode account
+            # this order will be rejected with a clear retCode rather than silently
+            # opening the wrong leg — that mismatch must surface, not be masked.
+            "positionIdx": self.config.position_idx,
         }
         if request.order_type is OrderType.LIMIT:
             params["orderType"] = "Limit"
@@ -313,6 +346,11 @@ class BybitBroker(Broker):
                 f"get_executions failed (retCode={resp.get('retCode')} "
                 f"retMsg={resp.get('retMsg')!r}); refusing to report no fills"
             )
+        # Bybit's execution feed carries closedSize but NOT realized PnL, so a close
+        # booked from executions alone would record zero PnL — every close would then
+        # look like a loss (net = 0 - fee < 0). Realized PnL lives in the closed-PnL
+        # feed; index it by orderId and attach the gross round-trip to each close.
+        closed_idx = self._closed_pnl_index()
         fills: list[Fill] = []
         for row in resp.get("result", {}).get("list", []):
             if row.get("execType") != "Trade":
@@ -320,6 +358,17 @@ class BybitBroker(Broker):
             ts = pd.Timestamp(int(_to_float(row.get("execTime"))), unit="ms", tz="UTC")
             if not _at_or_after(ts, since):
                 continue
+            closed_qty = _to_float(row.get("closedSize"))
+            realized = 0.0
+            if closed_qty > 0:
+                gross_total, size_total = closed_idx.get(row.get("orderId"), (None, None))
+                if gross_total is None:
+                    # The closed-PnL record for this order has not landed yet (venue
+                    # eventual consistency). Skip this close now rather than book a
+                    # wrong zero PnL: it stays after the ledger watermark, so a later
+                    # poll re-reads and books it once the realized PnL is available.
+                    continue
+                realized = gross_total * (closed_qty / size_total) if size_total else 0.0
             fills.append(Fill(
                 symbol=row.get("symbol", ""),
                 side=Side.BUY if row.get("side") == "Buy" else Side.SELL,
@@ -329,10 +378,52 @@ class BybitBroker(Broker):
                 timestamp=ts,
                 order_link_id=row.get("orderLinkId") or None,
                 exec_id=row.get("execId") or None,
-                realized_pnl=_to_float(row.get("execPnl") or row.get("closedPnl")),
-                closed_quantity=_to_float(row.get("closedSize")),
+                realized_pnl=realized,
+                closed_quantity=closed_qty,
             ))
         return fills
+
+    def _closed_pnl_index(self) -> dict[str, tuple[float, float]]:
+        """Map ``orderId -> (gross_realized, closed_size)`` from the closed-PnL feed.
+
+        Bybit's execution list omits realized PnL, so it is read from
+        ``/v5/position/closed-pnl``. The gross round-trip PnL is derived from the
+        record's authoritative ``avgEntryPrice``/``avgExitPrice``/``closedSize`` — a
+        closed long realizes ``size*(exit-entry)``, a closed short the negative
+        (``side`` is the closing order's: Sell flattens a long, Buy a short). Bybit's
+        own ``closedPnl`` field is deliberately NOT used: it is net of fees/funding,
+        while the ledger keeps ``realized_pnl`` gross with fees tracked separately, so
+        using it would double-count the ``execFee`` the fills already carry.
+
+        Best-effort: a failed/empty read returns an empty index (closes are then held
+        back, not mis-booked at zero — see ``get_fills``).
+        """
+        index: dict[str, tuple[float, float]] = {}
+        try:
+            resp = self._get_session().get_closed_pnl(
+                category=self.config.category, settleCoin="USDT", limit=100,
+            )
+        except Exception as exc:  # never break fill polling over the PnL read
+            logger.warning("get_closed_pnl failed: {}", exc)
+            return index
+        if int(resp.get("retCode", 0)) != 0:
+            logger.warning(
+                "get_closed_pnl retCode={} {}", resp.get("retCode"), resp.get("retMsg")
+            )
+            return index
+        for row in resp.get("result", {}).get("list", []):
+            order_id = row.get("orderId")
+            size = _to_float(row.get("closedSize") or row.get("qty"))
+            if not order_id or size <= 0:
+                continue
+            gross = size * (
+                _to_float(row.get("avgExitPrice")) - _to_float(row.get("avgEntryPrice"))
+            )
+            if row.get("side") == "Buy":  # a Buy close flattens a short -> invert
+                gross = -gross
+            prev_g, prev_s = index.get(order_id, (0.0, 0.0))
+            index[order_id] = (prev_g + gross, prev_s + size)
+        return index
 
     # --- reconciliation -----------------------------------------------------
     def _position_base_qty(self, symbol: str) -> float:

@@ -82,6 +82,35 @@ def test_lookback_window_respected():
     assert snap.closes.index.min() >= asof - pd.Timedelta(days=6)
 
 
+def test_incomplete_current_day_dropped():
+    # Panel runs through "today"; the current UTC day is still forming (partial
+    # funding sum + not-yet-closed daily close) and must not enter the snapshot.
+    now = pd.Timestamp("2023-01-12 03:00", tz="UTC")  # early in the current day
+    idx = pd.date_range("2023-01-01", periods=12, freq="D", tz="UTC")  # ...through Jan 12
+    rng = np.random.default_rng(1)
+    closes = pd.DataFrame(100 * np.cumprod(1 + rng.normal(0, 0.02, (12, 2)), axis=0),
+                          index=idx, columns=["A", "B"])
+    funding = pd.DataFrame(rng.normal(0, 1e-4, (12, 2)), index=idx, columns=["A", "B"])
+    prov = DailySnapshotProvider(_FakeUniverse(["A", "B"]), _FakeBars(closes), _FakeFunding(funding))
+
+    asof = pd.Timestamp("2023-01-12", tz="UTC")  # live runner passes today's midnight
+    snap = prov.snapshot(asof, lookback_days=10, now=now)
+
+    # Jan 12 (today, forming) is excluded; the last usable bar is Jan 11 (closed).
+    assert snap.closes.index.max() == pd.Timestamp("2023-01-11", tz="UTC")
+    assert snap.funding.index.max() == pd.Timestamp("2023-01-11", tz="UTC")
+
+
+def test_historical_asof_keeps_its_own_bar():
+    # A backtest/replay asof dated in the past is fully complete: the completeness
+    # guard must NOT strip the asof-dated bar (only the live current day is dropped).
+    closes, funding = _panels(n=12)
+    prov = DailySnapshotProvider(_FakeUniverse(["A", "B", "C"]), _FakeBars(closes), _FakeFunding(funding))
+    asof = pd.Timestamp("2023-01-08", tz="UTC")
+    snap = prov.snapshot(asof, lookback_days=6, now=pd.Timestamp("2026-07-20", tz="UTC"))
+    assert snap.closes.index.max() == asof  # past day fully retained
+
+
 def test_parquet_cache_roundtrip(tmp_path):
     cache = ParquetCache(tmp_path / "c")
     assert cache.load("k") is None

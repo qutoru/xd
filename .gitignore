@@ -28,6 +28,13 @@ data/telegram_prefs.json
 # Bot subscription state + known-users registry (contain chat ids / usernames)
 data/subscriptions.json
 data/users.json
+# Bot runtime state (contain chat ids / realized PnL) + logs — never commit
+data/pending_signals.json
+data/notified_outcomes.json
+data/risk_state.json
+data/ledger.json
+data/*.log
+data/research/*.log
 
 # Trained models (generated artifacts)
 models/*.txt

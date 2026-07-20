@@ -58,6 +58,9 @@ TELEGRAM_RISK_PREFS_PATH: Path = DATA_DIR / "risk_prefs.json"
 # Owner-only semi-automatic approval: signals proposed by the pipeline that await
 # the owner's Accept/Ignore tap in the Telegram bot.
 TELEGRAM_PENDING_PATH: Path = DATA_DIR / "pending_signals.json"
+# Execution ids of closed trades already announced (WIN/LOSE) to the owner, so the
+# outcome reporter never double-sends across listener ticks or process restarts.
+TELEGRAM_OUTCOMES_PATH: Path = DATA_DIR / "notified_outcomes.json"
 
 # Enrich raw data with funding rate + open interest features. Implemented and
 # tested (see RESEARCH.md E3) but did NOT improve out-of-sample edge on 15m, so

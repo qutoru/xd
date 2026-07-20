@@ -114,9 +114,10 @@ def test_paper_get_fills_since_is_inclusive_lower_bound():
 
 # --- LIVE execution feed -----------------------------------------------------
 class _ExecSession:
-    def __init__(self, rows, ret=0):
+    def __init__(self, rows, ret=0, pnl_rows=None):
         self._rows = rows
         self._ret = ret
+        self._pnl_rows = pnl_rows or []
 
     def get_server_time(self):
         return {"retCode": 0, "result": {"timeSecond": "1"}}
@@ -124,6 +125,10 @@ class _ExecSession:
     def get_executions(self, **kw):
         return {"retCode": self._ret, "retMsg": "err" if self._ret else "OK",
                 "result": {"list": self._rows}}
+
+    def get_closed_pnl(self, **kw):
+        # Execution feed carries no realized PnL; it lives here (see _closed_pnl_index).
+        return {"retCode": 0, "result": {"list": self._pnl_rows}}
 
 
 def _live_broker(session):
@@ -135,13 +140,17 @@ def test_live_get_fills_maps_trade_rows_and_skips_non_trades():
     rows = [
         {"execType": "Trade", "symbol": "BTCUSDT", "side": "Sell", "execQty": "10",
          "execPrice": "110", "execFee": "0.6", "execTime": "1700000000000",
-         "orderLinkId": "platform-BTCUSDT-a-close", "execId": "e1",
-         "execPnl": "100", "closedSize": "10"},
+         "orderLinkId": "platform-BTCUSDT-a-close", "orderId": "close-o", "execId": "e1",
+         "closedSize": "10"},
         {"execType": "Funding", "symbol": "BTCUSDT", "side": "Sell", "execQty": "0",
          "execPrice": "0", "execFee": "0.1", "execTime": "1700000000001",
          "orderLinkId": "", "execId": "f1", "closedSize": "0"},
     ]
-    fills = _live_broker(_ExecSession(rows)).get_fills()
+    # Realized PnL comes from the closed-PnL feed (gross = 10*(110-100) = 100), not
+    # from the execution row, which carries none.
+    pnl = [{"orderId": "close-o", "side": "Sell", "closedSize": "10",
+            "avgEntryPrice": "100", "avgExitPrice": "110", "closedPnl": "99.4"}]
+    fills = _live_broker(_ExecSession(rows, pnl_rows=pnl)).get_fills()
     assert len(fills) == 1                             # funding row skipped
     f = fills[0]
     assert f.side is Side.SELL and np.isclose(f.quantity, 10.0)

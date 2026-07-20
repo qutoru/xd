@@ -152,6 +152,15 @@ _CATALOG: dict[str, dict[str, str]] = {
         "owner_blocked": "⛔ Blocked by risk control: {reason}. No order placed.",
         "owner_accepted": "✅ Accepted {symbol} {side} — filled {filled}, rejected {rejected}.",
         "owner_error": "⚠️ Order placement failed — see logs. Not placed.",
+        # Trade-outcome report sent when a position closes (owner-only).
+        "outcome_win": "WIN",
+        "outcome_lose": "LOSE",
+        "outcome_breakeven": "BREAK-EVEN",
+        "outcome_pnl": "PnL",
+        "outcome_tp": "🎯 Take-Profit hit",
+        "outcome_sl": "🛑 Stop-Loss hit",
+        "outcome_rebalance": "🔄 Closed on rebalance",
+        "outcome_manual": "Position closed",
         "welcome": (
             "Hi, this is Bybit Smart Signals!\n"
             "\n"
@@ -296,6 +305,15 @@ _CATALOG: dict[str, dict[str, str]] = {
         "owner_blocked": "⛔ Заблокировано риск-контролем: {reason}. Ордер не выставлен.",
         "owner_accepted": "✅ Принято {symbol} {side} — исполнено {filled}, отклонено {rejected}.",
         "owner_error": "⚠️ Не удалось выставить ордер — см. логи. Не выставлено.",
+        # Итог сделки, присылается при закрытии позиции (только владельцу).
+        "outcome_win": "WIN",
+        "outcome_lose": "LOSE",
+        "outcome_breakeven": "В НОЛЬ",
+        "outcome_pnl": "PnL",
+        "outcome_tp": "🎯 Сработал тейк-профит",
+        "outcome_sl": "🛑 Сработал стоп-лосс",
+        "outcome_rebalance": "🔄 Закрыто по ребалансу",
+        "outcome_manual": "Позиция закрыта",
         "welcome": (
             "Привет, это Bybit Smart Signals!\n"
             "\n"

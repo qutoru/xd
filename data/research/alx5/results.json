@@ -1,0 +1,71 @@
+{
+  "stageA": {
+    "med_sharpe": 1.9412033153004207,
+    "anchor_ok": true,
+    "ic_mean": 0.018305441545034915,
+    "ic_nw_t": 4.699087770005849,
+    "ic_ok": true,
+    "pass": true
+  },
+  "stageB": {
+    "real_sharpe": 1.8899420172651105,
+    "six_fold": [
+      1.7431364104081661,
+      3.296196408445105,
+      1.0537894997846413,
+      0.18128966238398234,
+      2.2351514516552977,
+      2.134860741054157
+    ],
+    "folds_positive": 6,
+    "pre2023_sharpe": 1.3985583394440075,
+    "pre2023_n": 731,
+    "pass_sharpe": true,
+    "pass_folds": true,
+    "pass_pre": true,
+    "pass": true
+  },
+  "stageC": {
+    "lag0_gross_sharpe": 3.095906646888848,
+    "lag1_gross_sharpe": 2.24858344080804,
+    "c1_pass": true,
+    "attrib_identity": true,
+    "net_identity": true,
+    "c2_pass": true,
+    "harsh_sharpe": 1.7800724373938255,
+    "c3_pass": true,
+    "pass": true
+  },
+  "descriptive_ladder": {
+    "hold_1": {
+      "avg_turnover": 0.2213445021645022,
+      "taker": 1.7976535912751026,
+      "MED": 1.9412033153004207,
+      "ideal_maker": 2.084690806793374,
+      "realistic_maker": 1.8899420172651105
+    },
+    "hold_2": {
+      "avg_turnover": 0.17813489177489178,
+      "taker": 1.7874786665113587,
+      "MED": 1.9166745155426228,
+      "ideal_maker": 2.0457448486424217,
+      "realistic_maker": 1.8705460058298435
+    },
+    "hold_3": {
+      "avg_turnover": 0.15334709956709955,
+      "taker": 1.7930419468346763,
+      "MED": 1.8922077137524873,
+      "ideal_maker": 1.9912633820709595,
+      "realistic_maker": 1.8568028664817426
+    },
+    "hold_5": {
+      "avg_turnover": 0.1276174025974026,
+      "taker": 1.8965119960698353,
+      "MED": 1.9855281178579918,
+      "ideal_maker": 2.0743258563753972,
+      "realistic_maker": 1.9537602544068098
+    }
+  },
+  "verdict": "PASS",
+  "reason": "all stages survive \u2014 candidate for a separate forward maker-paper protocol"
+}

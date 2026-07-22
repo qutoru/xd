@@ -1,0 +1,152 @@
+{
+  "stage1": {
+    "n_symbols": 40,
+    "off_grid_frac": 0.0029642532151797885,
+    "symbols": [
+      "BTC",
+      "ETH",
+      "BNB",
+      "XRP",
+      "SOL",
+      "ADA",
+      "DOGE",
+      "DOT",
+      "LTC",
+      "LINK",
+      "BCH",
+      "AVAX",
+      "TRX",
+      "ATOM",
+      "ETC",
+      "XLM",
+      "NEAR",
+      "FIL",
+      "UNI",
+      "AAVE",
+      "ICP",
+      "APT",
+      "ARB",
+      "OP",
+      "SAND",
+      "MANA",
+      "AXS",
+      "EOS",
+      "INJ",
+      "RUNE",
+      "GRT",
+      "ALGO",
+      "THETA",
+      "EGLD",
+      "CRV",
+      "COMP",
+      "SUSHI",
+      "ZEC",
+      "DASH",
+      "GALA"
+    ],
+    "window": [
+      "2023-03-23",
+      "2025-05-21"
+    ],
+    "n_cols": 40,
+    "no_funding_leak": true
+  },
+  "stage2": {
+    "sharpe": 1.3526292826074124,
+    "ci_lo": -0.00857173569351916,
+    "ci_hi": 2.7853530675492175,
+    "dsr": 0.2931264648110307,
+    "n": 790,
+    "pass": false
+  },
+  "stage3": {
+    "sharpe": 0.20825924427991468,
+    "ci_lo": -1.1408260919044428,
+    "ci_hi": 1.6364760449157831,
+    "dsr": 0.01274823497082163,
+    "n": 730,
+    "n_cols": 34,
+    "pass": false,
+    "window": [
+      "2021-07-07",
+      "2023-07-07"
+    ]
+  },
+  "stage4": {
+    "binance_factor_corr": {
+      "reversal": -0.12617634703723668,
+      "momentum": 0.05277116168164026,
+      "raw_funding": 0.5714102860461694
+    },
+    "cross": {
+      "binance": {
+        "sharpe": 1.3526292826074124,
+        "funding_corr": 0.5714102860461694
+      },
+      "okx": {
+        "sharpe": 1.8958888710423667,
+        "ci_lo": -1.4548001321664812,
+        "n": 96,
+        "n_cols": 38,
+        "funding_corr": 0.5810970662378528,
+        "window": [
+          "2026-04-07",
+          "2026-07-12"
+        ]
+      },
+      "bybit": {
+        "sharpe": 1.8994293945707035,
+        "ci_lo": 0.4782766379613063,
+        "n": 582,
+        "n_cols": 40,
+        "funding_corr": 0.5622753613027015,
+        "window": [
+          "2023-10-17",
+          "2025-05-21"
+        ]
+      }
+    }
+  },
+  "stage5": {
+    "per_year": {
+      "2023": 0.4495170591330045,
+      "2024": 1.4675982304168593,
+      "2025": 2.8299949974514576
+    },
+    "six_fold": [
+      2.5688677047375146,
+      -0.40923812685467337,
+      -0.6012641295769501,
+      2.4228421887754577,
+      2.022508730580434,
+      2.707451715343048
+    ],
+    "folds_positive": 4
+  },
+  "stage6": {
+    "sharpe": 1.9259138514083705,
+    "ci_lo": 1.1075972075248934,
+    "ci_hi": 2.740258715303352,
+    "dsr": 0.9896468809858766,
+    "n": 2082,
+    "n_cols": 40
+  },
+  "stage7": {
+    "sharpe_optimistic": 1.7121633985667595,
+    "sharpe_med": 1.3526292826074124,
+    "sharpe_pessimistic": 0.38369218872757943,
+    "eff_bps_pessimistic": 22.296515593418857,
+    "pass": true
+  },
+  "stage8": {
+    "funding_median": 0.00027413000000000003,
+    "funding_neg_frac": 0.17610759493670886,
+    "funding_pnl_share": 0.3685714329886305
+  },
+  "verdict": "C. REJECTED",
+  "cross_flags": {
+    "okx_supportive": true,
+    "bybit_control_ok": true,
+    "binance_funding_corr_pos": true
+  }
+}

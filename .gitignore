@@ -39,3 +39,4 @@ data/research/*.log
 # Trained models (generated artifacts)
 models/*.txt
 models/*_meta.json
+data/research/alx6/fetch.log

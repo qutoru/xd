@@ -1,0 +1,21 @@
+{
+  "stageA": {
+    "base_sharpe": 1.8899420172651105,
+    "ic_nw_t": 4.699087770005849,
+    "pass": true
+  },
+  "stageB": {
+    "mom_sharpe": 0.7929143659744873,
+    "b1": true,
+    "corr": -0.08999371431834916,
+    "b2": true,
+    "combined_sharpe": 1.895710156596586,
+    "need": 2.0399420172651106,
+    "b3": false,
+    "folds_ge": 4,
+    "b4": true,
+    "pass": false
+  },
+  "verdict": "FAIL",
+  "reason": "Stage B \u2014 momentum sleeve is not a real, orthogonal, book-lifting alpha (H0 not rejected)"
+}

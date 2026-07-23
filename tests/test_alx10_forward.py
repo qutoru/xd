@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from alpha_library.alx10_forward_paper import forward as fwd
+from alpha_library.alx3_external_replication import data_sources as ds
 
 
 def _panel(T=220, N=10, seed=1):
@@ -55,6 +56,21 @@ def test_evaluate_observing_before_horizon():
     res = fwd.evaluate(led)
     assert res["status"] == "OBSERVING"
     assert res["n_days"] == n
+
+
+def test_refresh_cache_drops_only_target_venue_files(monkeypatch, tmp_path):
+    """refresh_cache removes this venue's kl/fund parquets for the given bases and
+    leaves unrelated cache files (onboard, other symbols) untouched."""
+    monkeypatch.setattr(ds, "CACHE", tmp_path)
+    for name in ("binance_kl_BTCUSDT", "binance_fund_BTCUSDT",
+                 "binance_kl_ETHUSDT", "binance_fund_ETHUSDT",
+                 "binance_onboard", "binance_kl_ZZZUSDT"):
+        (tmp_path / f"{name}.parquet").write_bytes(b"x")
+    removed = fwd.refresh_cache(["BTC", "ETH"])
+    assert removed == 4
+    assert not (tmp_path / "binance_kl_BTCUSDT.parquet").exists()
+    assert (tmp_path / "binance_onboard.parquet").exists()      # untouched
+    assert (tmp_path / "binance_kl_ZZZUSDT.parquet").exists()   # non-target symbol untouched
 
 
 def test_evaluate_early_fail_drawdown():

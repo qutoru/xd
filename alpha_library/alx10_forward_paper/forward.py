@@ -23,6 +23,7 @@ from loguru import logger
 
 from alpha_library.alx_funding_price_validation.validate import sharpe
 from alpha_library.alx3_external_replication import replicate as rep
+from alpha_library.alx3_external_replication import data_sources as ds
 from alpha_library.alx4_regime_analysis import characterize as ch
 from alpha_library.alx8_momentum_sleeve import momentum as mo
 from alpha_library.alx9_riskparity_blend import riskparity as rp
@@ -95,8 +96,30 @@ def compute_forward_rows(close: pd.DataFrame, dfund: pd.DataFrame,
     return out
 
 
-def record(*, now: pd.Timestamp | None = None) -> pd.DataFrame:
+def refresh_cache(bases: list[str] = BASES) -> int:
+    """Drop the cached Binance kline+funding parquets for `bases` so the next
+    `build_daily` RE-FETCHES full history from the network, ingesting new bars.
+
+    Only touches this venue's per-symbol kl/fund files (klines & funding are
+    immutable history — re-fetch reproduces the past and appends new days), never
+    the onboard map or other venues. Files are git-ignored and regenerable.
+    """
+    removed = 0
+    for base in bases:
+        sym = ds.native_symbol("binance", base)
+        for kind in (f"binance_kl_{sym}", f"binance_fund_{sym}"):
+            p = ds.CACHE / f"{kind}.parquet"
+            if p.exists():
+                p.unlink()
+                removed += 1
+    logger.info("refresh_cache: dropped {} cached parquet(s) -> will re-fetch", removed)
+    return removed
+
+
+def record(*, now: pd.Timestamp | None = None, refresh: bool = False) -> pd.DataFrame:
     now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if refresh:
+        refresh_cache(BASES)
     close, qvol, dfund, _ = rep.build_daily("binance", BASES)
     rows = compute_forward_rows(close, dfund, now=now)
     if rows.empty:

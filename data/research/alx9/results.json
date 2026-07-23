@@ -1,0 +1,21 @@
+{
+  "stageA": {
+    "base_sharpe": 1.8899420172651105,
+    "ic_nw_t": 4.699087770005849,
+    "mom_sharpe": 0.7929143659744873,
+    "corr": -0.08999371431834916,
+    "pass": true
+  },
+  "stageB": {
+    "rp_sharpe": 2.0164910164855048,
+    "need": 2.0399420172651106,
+    "b1": false,
+    "folds_ge": 4,
+    "b2": true,
+    "avg_w_fund": 0.5756076158200374,
+    "avg_w_mom": 0.42439238417996256,
+    "pass": false
+  },
+  "verdict": "FAIL",
+  "reason": "Stage B \u2014 risk-parity blend does not lift the book by the decisive margin (H0 not rejected)"
+}

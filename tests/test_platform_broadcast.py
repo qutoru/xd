@@ -49,16 +49,18 @@ def test_broadcast_fans_out_to_all_active_subscribers(tmp_path):
     assert {m["chat_id"] for m in client.sent} == {"1", "2"}
 
 
-def test_start_capped_to_three_highest_confidence_pairs(tmp_path):
+def test_start_capped_to_twenty_highest_confidence_pairs(tmp_path):
     subs = _subs(tmp_path)
     subs.grant("1", 30, "START")
     client = _FakeClient()
-    intents = [
-        _intent("A", 0.1), _intent("B", 0.9), _intent("C", 0.5),
-        _intent("D", 0.7), _intent("E", 0.3),
-    ]
+    # 22 pairs offered; START must receive only its best 20 by confidence.
+    intents = [_intent(f"S{n:02d}", n / 100.0) for n in range(1, 23)]
     SubscriberBroadcaster(client, subs).broadcast(intents)
-    assert _symbols_sent(client) == ["B", "D", "C"]  # top-3 by confidence
+    sent = _symbols_sent(client)
+    assert len(sent) == 20  # capped at 20
+    # top-20 by confidence => the two lowest (S01, S02) are dropped, highest first.
+    assert sent[0] == "S22"
+    assert "S01" not in sent and "S02" not in sent
 
 
 def test_pro_receives_all_pairs(tmp_path):
@@ -117,9 +119,9 @@ def test_active_sub_with_unknown_plan_defaults_to_start(tmp_path):
     subs = _subs(tmp_path)
     subs.grant("u", 30, "test")  # unrecognised label -> base tier
     client = _FakeClient()
-    intents = [_intent("A", 0.1), _intent("B", 0.9), _intent("C", 0.5), _intent("D", 0.7)]
+    intents = [_intent(f"S{n:02d}", n / 100.0) for n in range(1, 23)]
     SubscriberBroadcaster(client, subs).broadcast(intents)
-    assert len(client.sent) == 3  # capped like START
+    assert len(client.sent) == 20  # capped like START (max_pairs=20)
 
 
 def test_send_failure_does_not_stop_the_fanout(tmp_path):

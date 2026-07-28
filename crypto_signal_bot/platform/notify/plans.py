@@ -36,12 +36,12 @@ class Entitlements:
 
 
 # The single source of truth for tier capabilities. Mirrors the /subscribe copy:
-#   START — up to 3 pairs, real-time signals with TP/SL (base).
+#   START — up to 20 pairs, real-time signals with TP/SL (base).
 #   PRO   — all pairs, priority delivery, trade statistics.
 #   VIP   — everything in PRO + early-access strategies + personal risk settings.
 ENTITLEMENTS: dict[Tier, Entitlements] = {
     Tier.START: Entitlements(
-        max_pairs=3, stats=False, beta_strategies=False, custom_risk=False, priority=2
+        max_pairs=20, stats=False, beta_strategies=False, custom_risk=False, priority=2
     ),
     Tier.PRO: Entitlements(
         max_pairs=None, stats=True, beta_strategies=False, custom_risk=False, priority=1

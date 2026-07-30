@@ -32,3 +32,11 @@ data/users.json
 # Trained models (generated artifacts)
 models/*.txt
 models/*_meta.json
+
+# Bot runtime logs
+*.log
+# Bot runtime state (ledger / risk / pending signals contain chat ids & trade data)
+data/ledger.json
+data/pending_signals.json
+data/notified_outcomes.json
+data/risk_state.json

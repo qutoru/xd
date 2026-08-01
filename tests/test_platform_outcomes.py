@@ -96,6 +96,27 @@ def test_seed_if_new_baselines_existing_closes(tmp_path):
     assert client.sent == []
 
 
+def test_partial_fills_aggregated_into_one_message(tmp_path):
+    # One stop-loss that settles in many partial executions (distinct execIds,
+    # each with its own slice of the loss) must yield ONE LOSE message carrying
+    # the summed net PnL — not one message per partial fill.
+    fills = [_fill("SOLUSDT", "entry", closed=0.0, link="alx-SOLUSDT-entry")]
+    fills += [
+        _fill("SOLUSDT", f"p{i}", realized=-2.0, fee=0.1, closed=1.0, link="alx-SOLUSDT-sl")
+        for i in range(20)
+    ]
+    reporter, client, *_ = _reporter(tmp_path, fills)
+
+    sent = reporter.poll()
+
+    assert sent == 1
+    assert len(client.sent) == 1
+    text = client.sent[0]["text"]
+    assert "SOLUSDT — LOSE" in text
+    assert "-42.00 USDT" in text          # 20 * (-2.0 - 0.1) = -42.00
+    assert reporter.poll() == 0           # nothing re-announced on the next tick
+
+
 def test_breakeven_close_reports_zero(tmp_path):
     fills = [_fill("BTCUSDT", "c1", realized=0.0, fee=0.0, closed=1.0, link="a-BTCUSDT-close")]
     reporter, client, *_ = _reporter(tmp_path, fills)

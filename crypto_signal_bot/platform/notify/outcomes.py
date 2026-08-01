@@ -127,38 +127,60 @@ class TradeOutcomeReporter:
 
         notified = self._state.load()
         lang = self._lang()
-        sent = 0
-        changed = False
+
+        # One venue close (stop-loss / take-profit) can settle in many partial
+        # executions, each a distinct execId with its own prorated PnL. Announcing
+        # per execId would spam one WIN/LOSE per partial fill, so aggregate the
+        # not-yet-announced closes by (symbol, attribution) into a single message
+        # carrying the summed net PnL of the whole close.
+        groups: dict[tuple[str, str], dict] = {}
+        order: list[tuple[str, str]] = []
         for entry in ledger.entries:
             if not _is_close(entry.attribution) or entry.exec_id is None:
                 continue
             if entry.exec_id in notified:
                 continue
+            key = (entry.symbol, entry.attribution)
+            g = groups.get(key)
+            if g is None:
+                g = {"net": 0.0, "ids": []}
+                groups[key] = g
+                order.append(key)
+            g["net"] += entry.realized_pnl - entry.fee
+            g["ids"].append(entry.exec_id)
+
+        sent = 0
+        changed = False
+        for key in order:
+            symbol, attribution = key
+            g = groups[key]
             try:
-                self._client.send_message(chat_id=self._chat_id, text=self._format(entry, lang))
+                self._client.send_message(
+                    chat_id=self._chat_id,
+                    text=self._format(symbol, attribution, g["net"], lang),
+                )
                 sent += 1
-            except Exception as exc:  # retry on a later tick; leave it unmarked
-                logger.error("Outcome reporter: send failed for {}: {}", entry.symbol, exc)
+            except Exception as exc:  # retry on a later tick; leave the group unmarked
+                logger.error("Outcome reporter: send failed for {}: {}", symbol, exc)
                 continue
-            notified.add(entry.exec_id)
+            notified.update(g["ids"])
             changed = True
         if changed:
             self._state.save(notified)
         return sent
 
     @staticmethod
-    def _format(entry, lang: str) -> str:
-        """Render one closed-trade ledger entry as a WIN/LOSE message."""
-        net = entry.realized_pnl - entry.fee
+    def _format(symbol: str, attribution: str, net: float, lang: str) -> str:
+        """Render an aggregated close (summed net PnL) as a WIN/LOSE message."""
         if net > 0:
             emoji, head = "🏆", t(lang, "outcome_win")
         elif net < 0:
             emoji, head = "❌", t(lang, "outcome_lose")
         else:
             emoji, head = "➖", t(lang, "outcome_breakeven")
-        reason = t(lang, _CLOSE_LABELS.get(entry.attribution, "outcome_manual"))
+        reason = t(lang, _CLOSE_LABELS.get(attribution, "outcome_manual"))
         return "\n".join([
-            f"{emoji} {entry.symbol} — {head}",
+            f"{emoji} {symbol} — {head}",
             reason,
             f"{t(lang, 'outcome_pnl')}: {net:+.2f} USDT",
         ])

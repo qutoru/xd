@@ -367,6 +367,21 @@ class DailyPipeline:
                     self._persist_emergency_stop()
                 reconciliation = ReconciliationReport.errored(book.asof, str(exc))
 
+        # Reconciliation-as-gate (opt-in via RISK_HALT_ON_RECON_MISMATCH): a mismatch
+        # or a failed read means the platform's view of the account is not trusted, so
+        # trip the latched emergency stop — subsequent cycles open no new entries until
+        # the owner investigates and resets. Existing positions are never touched.
+        if (self.risk_control is not None and reconciliation is not None
+                and self.risk_control.config.halt_on_recon_mismatch
+                and not reconciliation.ok):
+            logger.error(
+                "Reconciliation not OK (failed={}, {} discrepancy(ies)) — tripping "
+                "emergency stop; no new entries until reset.",
+                reconciliation.failed, reconciliation.n_discrepancies,
+            )
+            self.risk_control.trip_emergency_stop()
+            self._persist_emergency_stop()
+
         # Book realized PnL from the venue's fills (runs every cycle, independent of
         # halt/execute: TP/SL that fired between cycles must still be recorded).
         self._update_accounting()

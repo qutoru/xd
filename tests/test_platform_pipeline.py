@@ -232,6 +232,50 @@ def test_reconciliation_survives_broker_failure_without_crashing():
     assert np.isfinite(result.shadow.daily_pnl)  # cycle continued
 
 
+def _recon_gate_pipeline(asof, *, halt_on_mismatch):
+    """A pipeline whose reconciler always reports a mismatch, with risk control."""
+    from crypto_signal_bot.platform.execution.reconciler import (
+        ReconciliationReport,
+        Reconciler,
+    )
+    from crypto_signal_bot.platform.risk_control.control import (
+        ProductionRiskControl,
+        RiskControlConfig,
+    )
+
+    class _MismatchReconciler(Reconciler):
+        def reconcile(self, expected, actual, *, asof=None):
+            return ReconciliationReport.errored(asof, "forced mismatch")
+
+    rc = ProductionRiskControl(RiskControlConfig(halt_on_recon_mismatch=halt_on_mismatch))
+    return DailyPipeline(
+        _FakeSnapshotProvider(_snapshot(asof)),
+        signal_names=["alx"],
+        execution_engine=ExecutionEngine(InMemoryBroker(value=10_000.0)),
+        shadow_runner=ShadowRunner(),
+        portfolio_config=PortfolioConfig(k_pct=0.30, gross_target=1.0),
+        reconciler=_MismatchReconciler(),
+        risk_control=rc,
+        execute=True,
+        lookback_days=10,
+    ), rc
+
+
+def test_reconciliation_mismatch_trips_emergency_stop_when_gated():
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    pipe, rc = _recon_gate_pipeline(asof, halt_on_mismatch=True)
+    result = pipe.run_once(asof)
+    assert result.reconciliation is not None and not result.reconciliation.ok
+    assert rc.emergency_stopped is True  # gate latched the stop
+
+
+def test_reconciliation_mismatch_is_only_logged_when_not_gated():
+    asof = pd.Timestamp("2023-05-01", tz="UTC")
+    pipe, rc = _recon_gate_pipeline(asof, halt_on_mismatch=False)
+    pipe.run_once(asof)
+    assert rc.emergency_stopped is False  # default: mismatch stays a diagnostic
+
+
 # --- Stage 13: reduce-only TP/SL brackets in the daily cycle ----------------
 class _LiveSession(_FakeBybitSession):
     """LIVE mock: records placed orders; can reject reduce-only legs."""

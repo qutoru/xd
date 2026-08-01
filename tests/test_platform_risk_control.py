@@ -127,17 +127,19 @@ def test_risk_control_config_from_env_reads_all_limits(monkeypatch):
     monkeypatch.setenv("RISK_MAX_OPEN_POSITIONS", "3")
     monkeypatch.setenv("RISK_MAX_EXPOSURE", "0.5")
     monkeypatch.setenv("RISK_MAX_POSITION_SIZE", "0.1")
+    monkeypatch.setenv("RISK_HALT_ON_RECON_MISMATCH", "true")
     cfg = RiskControlConfig.from_env()
     assert cfg.kill_switch is True
     assert cfg.daily_loss_limit == 0.05
     assert cfg.max_open_positions == 3
     assert cfg.max_exposure == 0.5
     assert cfg.max_position_size == 0.1
+    assert cfg.halt_on_recon_mismatch is True
 
 
 def test_risk_control_config_from_env_unset_is_the_noop_default(monkeypatch):
     for k in ("RISK_KILL_SWITCH", "RISK_DAILY_LOSS_LIMIT", "RISK_MAX_OPEN_POSITIONS",
-              "RISK_MAX_EXPOSURE", "RISK_MAX_POSITION_SIZE"):
+              "RISK_MAX_EXPOSURE", "RISK_MAX_POSITION_SIZE", "RISK_HALT_ON_RECON_MISMATCH"):
         monkeypatch.delenv(k, raising=False)
     assert RiskControlConfig.from_env() == RiskControlConfig()
 

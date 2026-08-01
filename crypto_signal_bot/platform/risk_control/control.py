@@ -52,6 +52,10 @@ class RiskControlConfig:
     max_open_positions: int | None = None   # cap on simultaneously open positions
     max_exposure: float | None = None       # cap on total gross exposure, as a fraction of NAV
     max_position_size: float | None = None  # cap per order, as a fraction of NAV
+    # When True, a reconciliation mismatch/failure (platform view != exchange) trips
+    # the latched emergency stop, so no new entries open until the owner resets. Off
+    # by default (a reconciliation discrepancy stays a logged diagnostic).
+    halt_on_recon_mismatch: bool = False
 
     @classmethod
     def from_env(cls) -> RiskControlConfig:
@@ -80,6 +84,7 @@ class RiskControlConfig:
             max_open_positions=_i("RISK_MAX_OPEN_POSITIONS"),
             max_exposure=_f("RISK_MAX_EXPOSURE"),
             max_position_size=_f("RISK_MAX_POSITION_SIZE"),
+            halt_on_recon_mismatch=_b("RISK_HALT_ON_RECON_MISMATCH"),
         )
 
 

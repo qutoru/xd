@@ -224,8 +224,34 @@ def test_reduce_only_tp_and_sl_are_close_only_with_levels():
     assert lp["price"] == "110.0" and lp["qty"] == "0.5"  # sized to the position
 
     sp = [o for o in s.orders if o.get("triggerPrice")][0]
-    assert sp["reduceOnly"] is True and sp["orderType"] == "Market"
-    assert sp["triggerPrice"] == "95.0" and sp["triggerDirection"] == 2  # long stop = fall
+    assert sp["reduceOnly"] is True and sp["triggerDirection"] == 2  # long stop = fall
+    assert sp["triggerPrice"] == "95.0"
+    # default stop_slippage_tol > 0 -> stop-LIMIT capping the fill below the trigger
+    assert sp["orderType"] == "Limit" and sp["price"] == "94.0"  # 95.0*(1-0.01) @ 0.5 tick
+
+
+def test_stop_market_when_slippage_tol_zero():
+    # tol=0 keeps the legacy stop-MARKET (guaranteed exit, no slippage cap).
+    s = FakeSession(position_size=0.5)
+    cfg = BybitConfig(api_key="k", api_secret="s", testnet=True,
+                      mode=TradingMode.LIVE, stop_slippage_tol=0.0)
+    broker = BybitBroker(cfg, session=s)
+    broker.submit(OrderRequest("BTCUSDT", Side.SELL, 50.0, order_type=OrderType.STOP,
+                               price=95.0, reduce_only=True))
+    sp = [o for o in s.orders if o.get("triggerPrice")][0]
+    assert sp["orderType"] == "Market" and "price" not in sp
+    assert sp["triggerPrice"] == "95.0"
+
+
+def test_stop_limit_buy_close_bounds_above_trigger():
+    # A short-closing BUY stop caps the fill ABOVE the trigger.
+    s = FakeSession(position_size=-0.5)  # an open short to close
+    broker = BybitBroker(_cfg(), session=s)
+    broker.submit(OrderRequest("BTCUSDT", Side.BUY, 50.0, order_type=OrderType.STOP,
+                               price=105.0, reduce_only=True))
+    sp = [o for o in s.orders if o.get("triggerPrice")][0]
+    assert sp["triggerDirection"] == 1  # short stop = rise
+    assert sp["orderType"] == "Limit" and sp["price"] == "106.0"  # 105.0*(1+0.01) @ 0.5 tick
 
 
 # --- API error handling -----------------------------------------------------

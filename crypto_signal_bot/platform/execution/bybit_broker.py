@@ -238,11 +238,23 @@ class BybitBroker(Broker):
             params["price"] = str(self._round_to_tick(request.price, info.tick_size))
             params["timeInForce"] = "GTC"
         elif request.order_type is OrderType.STOP:
-            # stop-market: triggers a Market close when price crosses the level
-            params["orderType"] = "Market"
             params["triggerPrice"] = str(self._round_to_tick(request.price, info.tick_size))
             params["triggerDirection"] = 2 if request.side is Side.SELL else 1
             params["triggerBy"] = "LastPrice"
+            tol = self.config.stop_slippage_tol
+            if tol > 0.0:
+                # stop-LIMIT: cap the triggered close to `tol` beyond the trigger so
+                # it can't sweep a thin book to any price. A SELL (closing a long) is
+                # bounded below the trigger, a BUY (closing a short) above it. Trade-
+                # off: a true gap through the limit may leave a remainder unfilled,
+                # which the next reconcile/trading cycle re-flattens (reduce-only).
+                factor = (1.0 - tol) if request.side is Side.SELL else (1.0 + tol)
+                params["orderType"] = "Limit"
+                params["price"] = str(self._round_to_tick(request.price * factor, info.tick_size))
+                params["timeInForce"] = "GTC"
+            else:
+                # stop-market: triggers a Market close when price crosses the level
+                params["orderType"] = "Market"
         else:
             params["orderType"] = "Market"
         return params

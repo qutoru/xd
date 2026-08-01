@@ -47,6 +47,10 @@ class BybitConfig:
     paper_equity: float = 10_000.0  # simulated NAV used in PAPER mode
     leverage: float = 1.0  # per-symbol leverage the broker sets before entries
     position_idx: int = 0  # 0 = one-way mode (hedge mode uses 1/2 — unsupported)
+    # Slippage cap on triggered stop closes: place the stop as a stop-LIMIT whose
+    # limit sits this fraction beyond the trigger (adverse side), instead of a
+    # stop-MARKET that sweeps a thin book to any price. 0 keeps the old stop-market.
+    stop_slippage_tol: float = 0.01
 
     @classmethod
     def from_env(cls) -> BybitConfig:
@@ -74,6 +78,7 @@ class BybitConfig:
             mode=TradingMode(os.getenv("BYBIT_TRADING_MODE", "shadow").strip().lower()),
             leverage=float(os.getenv("BYBIT_LEVERAGE", "1")),
             position_idx=int(os.getenv("BYBIT_POSITION_IDX", "0")),
+            stop_slippage_tol=float(os.getenv("BYBIT_STOP_SLIPPAGE_TOL", "0.01")),
         )
 
     @property
@@ -95,3 +100,5 @@ class BybitConfig:
             raise ValueError("leverage must be >= 1.0")
         if self.position_idx not in (0, 1, 2):
             raise ValueError("position_idx must be 0 (one-way) or 1/2 (hedge)")
+        if self.stop_slippage_tol < 0.0:
+            raise ValueError("stop_slippage_tol must be >= 0")

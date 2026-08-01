@@ -36,10 +36,21 @@ def tier_command_menu(
     if ent is not None and ent.custom_risk:  # VIP only
         menu.append({"command": "risk", "description": t(lang, "cmd_risk")})
     if is_admin:
+        rc = _ADMIN_RC_DESC.get(lang, _ADMIN_RC_DESC["en"])
         menu += [
             {"command": "grant", "description": t(lang, "cmd_grant")},
             {"command": "revoke", "description": t(lang, "cmd_revoke")},
             {"command": "subs", "description": t(lang, "cmd_subs")},
             {"command": "users", "description": t(lang, "cmd_users")},
+            {"command": "status", "description": rc["status"]},
+            {"command": "resume", "description": rc["resume"]},
         ]
     return menu
+
+
+# Risk-control command descriptions kept local (owner-only ops, not part of the
+# subscriber i18n catalog).
+_ADMIN_RC_DESC: dict[str, dict[str, str]] = {
+    "en": {"status": "Trading status (halt / active)", "resume": "Clear the emergency stop"},
+    "ru": {"status": "Статус торговли (стоп / активна)", "resume": "Снять аварийный стоп"},
+}

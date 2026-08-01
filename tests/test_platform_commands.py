@@ -35,7 +35,7 @@ def test_vip_adds_stats_and_risk():
 
 def test_admin_flag_appends_admin_commands():
     menu = tier_command_menu(None, "en", is_admin=True)
-    assert _names(menu) == _BASE + ["grant", "revoke", "subs", "users"]
+    assert _names(menu) == _BASE + ["grant", "revoke", "subs", "users", "status", "resume"]
 
 
 def test_non_admin_never_sees_admin_commands():

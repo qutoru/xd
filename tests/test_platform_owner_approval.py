@@ -94,6 +94,64 @@ def test_handles_only_own_namespace(tmp_path):
     assert not handler.handles("lang:en:greet")
 
 
+# -- emergency-stop reset (own:reset / /resume / /status) ---------------------
+
+def _handler_with_state(tmp_path, *, halted=False):
+    from crypto_signal_bot.platform.risk_control.state import RiskState, RiskStateStore
+
+    rc = ProductionRiskControl(RiskControlConfig())
+    rs = RiskStateStore(tmp_path / "risk_state.json")
+    if halted:
+        rc.trip_emergency_stop()
+        rs.save(RiskState(emergency_stopped=True))
+    handler = OwnerApprovalHandler(
+        owner_id=OWNER,
+        pending=PendingSignalStore(tmp_path / "pending.json"),
+        engine=ExecutionEngine(InMemoryBroker(value=10_000.0)),
+        risk_control=rc,
+        risk_state=rs,
+        prefs=LanguagePrefsStore(tmp_path / "prefs.json"),
+    )
+    return handler, rs
+
+
+def test_reset_button_clears_emergency_stop_in_memory_and_on_disk(tmp_path):
+    handler, rs = _handler_with_state(tmp_path, halted=True)
+    assert handler.is_halted() is True
+
+    client = _FakeBotClient()
+    handler.handle(data="own:reset", from_id=OWNER, chat_id=OWNER, message_id=55,
+                   callback_id="cb", client=client)
+
+    assert handler.is_halted() is False
+    assert rs.load().emergency_stopped is False  # persisted latch cleared too
+    assert client.edited  # the owner got a confirmation
+
+
+def test_reset_button_refused_for_non_owner(tmp_path):
+    handler, rs = _handler_with_state(tmp_path, halted=True)
+    client = _FakeBotClient()
+    handler.handle(data="own:reset", from_id="999", chat_id="999", message_id=1,
+                   callback_id="cb", client=client)
+    assert handler.is_halted() is True            # still halted
+    assert rs.load().emergency_stopped is True
+
+
+def test_status_keyboard_shows_reset_only_when_halted(tmp_path):
+    halted, _ = _handler_with_state(tmp_path, halted=True)
+    kb = halted.status_keyboard("en")
+    assert kb is not None
+    assert kb["inline_keyboard"][0][0]["callback_data"] == "own:reset"
+
+    active, _ = _handler_with_state(tmp_path / "active", halted=False)
+    assert active.status_keyboard("en") is None
+
+
+def test_reset_when_not_halted_reports_nothing_to_reset(tmp_path):
+    handler, _ = _handler_with_state(tmp_path, halted=False)
+    assert handler.reset_emergency_stop() is False  # was not halted
+
+
 # -- buttons are owner-only ---------------------------------------------------
 
 def test_owner_only_keyboard_present_for_owner():

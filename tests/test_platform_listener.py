@@ -254,6 +254,68 @@ def test_records_users_on_message(tmp_path):
     assert seen[0].username == "u1234"
 
 
+class _FakeOwnerHandler:
+    """Minimal owner handler exposing the risk-control surface the listener uses."""
+
+    def __init__(self, halted):
+        self._halted = halted
+        self.reset_called = False
+
+    def handles(self, data):
+        return data.startswith("own:")
+
+    def handle(self, **kwargs):
+        pass
+
+    def is_halted(self):
+        return self._halted
+
+    def reset_emergency_stop(self):
+        was, self._halted, self.reset_called = self._halted, False, True
+        return was
+
+    def reset_result_text(self, lang, was):
+        return "reset done" if was else "nothing to reset"
+
+    def status_text(self, lang):
+        return "HALTED" if self._halted else "ACTIVE"
+
+    def status_keyboard(self, lang):
+        return {"inline_keyboard": [[{"callback_data": "own:reset"}]]} if self._halted else None
+
+
+def _admin_listener_with_owner(tmp_path, *, halted):
+    client = _FakeBotClient()
+    prefs = LanguagePrefsStore(tmp_path / "prefs.json")
+    oh = _FakeOwnerHandler(halted)
+    listener = TelegramListener(
+        client, prefs,
+        subscriptions=SubscriptionStore(tmp_path / "subs.json"),
+        users=UsersStore(tmp_path / "users.json"),
+        admin_id=ADMIN, owner_handler=oh,
+    )
+    return listener, client, oh
+
+
+def test_admin_status_shows_halt_with_reset_button(tmp_path):
+    listener, client, _ = _admin_listener_with_owner(tmp_path, halted=True)
+    listener.handle_update(_msg_from(ADMIN, "/status"))
+    assert client.sent[-1]["text"] == "HALTED"
+    assert client.sent[-1]["reply_markup"] is not None  # Reset button attached
+
+
+def test_admin_resume_clears_the_emergency_stop(tmp_path):
+    listener, client, oh = _admin_listener_with_owner(tmp_path, halted=True)
+    listener.handle_update(_msg_from(ADMIN, "/resume"))
+    assert oh.reset_called is True and oh.is_halted() is False
+
+
+def test_status_resume_ignored_from_non_admin(tmp_path):
+    listener, _, oh = _admin_listener_with_owner(tmp_path, halted=True)
+    listener.handle_update(_msg_from(9999, "/resume"))
+    assert oh.reset_called is False  # non-admin cannot reset
+
+
 def test_admin_grant_creates_active_subscription(tmp_path):
     listener, client, subs, _ = _admin_listener(tmp_path)
     listener.handle_update(_msg_from(ADMIN, "/grant 1234 30 START"))
@@ -489,7 +551,7 @@ def test_admin_menu_includes_admin_commands(tmp_path):
     listener.handle_update(_msg_from(ADMIN, "/start"))
     names, scope = _last_menu(client)
     assert scope == {"type": "chat", "chat_id": ADMIN}
-    assert names[-4:] == ["grant", "revoke", "subs", "users"]
+    assert names[-6:] == ["grant", "revoke", "subs", "users", "status", "resume"]
 
 
 def test_regular_user_menu_excludes_admin_commands(tmp_path):

@@ -118,7 +118,7 @@ class TelegramBotClient(Protocol):
     ) -> None: ...
 
 
-_ADMIN_COMMANDS = ("/grant", "/revoke", "/subs", "/users")
+_ADMIN_COMMANDS = ("/grant", "/revoke", "/subs", "/users", "/status", "/resume")
 
 
 class TelegramListener:
@@ -305,7 +305,11 @@ class TelegramListener:
     # -- admin operations --------------------------------------------------
 
     def _handle_admin(self, command: str, args: list[str], chat_id: str, lang: str) -> None:
-        """Grant/revoke/list subscriptions — only reached for the admin."""
+        """Grant/revoke/list subscriptions + risk-control ops — admin only."""
+        # Risk-control ops don't need the subscription store; handle them first.
+        if command in ("/status", "/resume"):
+            self._handle_risk_admin(command, chat_id, lang)
+            return
         if self._subs is None:
             return
         if command == "/grant":
@@ -316,6 +320,21 @@ class TelegramListener:
             self._admin_list_subs(chat_id, lang)
         elif command == "/users":
             self._admin_list_users(chat_id, lang)
+
+    def _handle_risk_admin(self, command: str, chat_id: str, lang: str) -> None:
+        """`/status` (halt/active + Reset button) and `/resume` (clear the stop)."""
+        oh = self._owner_handler
+        if oh is None or not hasattr(oh, "reset_emergency_stop"):
+            self._client.send_message(chat_id=chat_id, text="Risk control unavailable.")
+            return
+        if command == "/resume":
+            was = oh.reset_emergency_stop()
+            self._client.send_message(chat_id=chat_id, text=oh.reset_result_text(lang, was))
+        else:  # /status — show state, with a Reset button when halted
+            self._client.send_message(
+                chat_id=chat_id, text=oh.status_text(lang),
+                reply_markup=oh.status_keyboard(lang),
+            )
 
     def _resolve_target(self, token: str) -> str | None:
         """Turn a /grant|/revoke target into a chat_id.

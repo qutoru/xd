@@ -40,7 +40,38 @@ from crypto_signal_bot.platform.risk_control.state import RiskStateStore
 OWNER_PREFIX = "own:"  # callback_data namespace for the approval buttons
 _ACCEPT = "acc"
 _IGNORE = "ign"
+_RESET = "reset"  # own:reset — clear the latched emergency stop (no pending signal)
 _DEFAULT_TTL_S = 24 * 3600  # a pending signal older than this is refused as stale
+
+# Owner-only risk-control text kept local (not in the subscriber i18n catalog) so
+# these operational messages stay isolated from the tier/subscribe copy.
+_RC_TEXT: dict[str, dict[str, str]] = {
+    "en": {
+        "halted": "🛑 Trading HALTED — emergency stop is active. No new entries until reset.",
+        "active": "✅ Trading active — no emergency stop.",
+        "reset_btn": "🔄 Reset emergency stop",
+        "reset_done": "✅ Emergency stop cleared — new entries allowed again.",
+        "not_halted": "✅ Nothing to reset — trading was already active.",
+    },
+    "ru": {
+        "halted": "🛑 Торговля ОСТАНОВЛЕНА — активен аварийный стоп. Новых входов нет до сброса.",
+        "active": "✅ Торговля активна — аварийного стопа нет.",
+        "reset_btn": "🔄 Сбросить аварийный стоп",
+        "reset_done": "✅ Аварийный стоп снят — новые входы снова разрешены.",
+        "not_halted": "✅ Сбрасывать нечего — торговля и так активна.",
+    },
+}
+
+
+def _rc(lang: str, key: str) -> str:
+    return _RC_TEXT.get(lang, _RC_TEXT[DEFAULT_LANGUAGE])[key]
+
+
+def reset_keyboard(lang: str) -> dict[str, Any]:
+    """Inline keyboard with a single owner-only Reset button (``own:reset``)."""
+    return {"inline_keyboard": [[
+        {"text": _rc(lang, "reset_btn"), "callback_data": f"{OWNER_PREFIX}{_RESET}"},
+    ]]}
 
 
 def approval_keyboard(token: str, lang: str) -> dict[str, Any]:
@@ -115,6 +146,45 @@ class OwnerApprovalHandler:
     def _lang(self, chat_id: str) -> str:
         return self._prefs.get(chat_id) if self._prefs is not None else DEFAULT_LANGUAGE
 
+    # -- emergency-stop admin (owner-only; used by /status, /resume and own:reset) --
+    def is_halted(self) -> bool:
+        """True when the latched emergency stop is set (persisted or in-memory)."""
+        if self._risk_state is not None:
+            try:
+                if self._risk_state.load().emergency_stopped:
+                    return True
+            except Exception:  # a bad state read must never break status/reset
+                pass
+        return self._risk_control.emergency_stopped
+
+    def reset_emergency_stop(self) -> bool:
+        """Clear the emergency stop in memory and on disk; return whether it was set.
+
+        Both must be cleared: the in-memory latch governs this process, the
+        persisted flag governs the next one (it survives restarts).
+        """
+        was = self.is_halted()
+        self._risk_control.reset_emergency_stop()
+        if self._risk_state is not None:
+            try:
+                state = self._risk_state.load()
+                if state.emergency_stopped:
+                    state.emergency_stopped = False
+                    self._risk_state.save(state)
+            except Exception as exc:
+                logger.error("Failed to clear persisted emergency stop: {}", exc)
+        return was
+
+    def status_text(self, lang: str) -> str:
+        return _rc(lang, "halted" if self.is_halted() else "active")
+
+    def status_keyboard(self, lang: str) -> dict[str, Any] | None:
+        """A Reset button when halted, else no keyboard."""
+        return reset_keyboard(lang) if self.is_halted() else None
+
+    def reset_result_text(self, lang: str, was_halted: bool) -> str:
+        return _rc(lang, "reset_done" if was_halted else "not_halted")
+
     def handle(
         self,
         *,
@@ -137,6 +207,14 @@ class OwnerApprovalHandler:
                     callback_query_id=callback_id, text=t(lang, "owner_denied")
                 )
             logger.warning("Owner approval refused for non-owner {}", from_id)
+            return
+
+        # Emergency-stop reset button (own:reset) — carries no pending signal token.
+        if data == f"{OWNER_PREFIX}{_RESET}":
+            was = self.reset_emergency_stop()
+            self._finish(client, chat_id, message_id, callback_id,
+                         _rc(lang, "reset_done" if was else "not_halted"))
+            logger.info("Owner reset emergency stop (was_halted={})", was)
             return
 
         parts = data[len(OWNER_PREFIX):].split(":")

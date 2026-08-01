@@ -11,6 +11,7 @@ consumes — never Execution, Broker, Bybit, Research or Strategy.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import pandas as pd
@@ -27,6 +28,26 @@ class RiskConfig:
     max_position_pct: float = 0.20     # cap per symbol, as a fraction of NAV
     max_symbol_notional: float = float("inf")  # absolute per-symbol notional cap
     min_notional: float = 5.0          # drop positions smaller than this notional
+
+    @classmethod
+    def from_env(cls) -> "RiskConfig":
+        """Build from ``RISK_*`` env vars (defaults preserve prior behaviour).
+
+        ``RISK_MAX_SYMBOL_NOTIONAL`` caps each name to an absolute USDT notional —
+        the venue-independent guard against sizing a position larger than a thin
+        book can absorb (empty/unset => no absolute cap).
+        """
+        def _f(name: str, default: float) -> float:
+            raw = os.getenv(name)
+            return default if raw is None or raw.strip() == "" else float(raw)
+
+        return cls(
+            gross_target=_f("RISK_GROSS_TARGET", 1.0),
+            max_gross=_f("RISK_MAX_GROSS", 1.0),
+            max_position_pct=_f("RISK_MAX_POSITION_PCT", 0.20),
+            max_symbol_notional=_f("RISK_MAX_SYMBOL_NOTIONAL", float("inf")),
+            min_notional=_f("RISK_MIN_NOTIONAL", 5.0),
+        )
 
 
 class RiskManager:

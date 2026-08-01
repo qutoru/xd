@@ -66,6 +66,25 @@ def test_nonpositive_nav_yields_no_positions():
     assert RiskManager().size(_book({"A": 0.5, "B": -0.5}), 0.0).empty
 
 
+def test_from_env_reads_caps_and_defaults(monkeypatch):
+    for k in ("RISK_GROSS_TARGET", "RISK_MAX_GROSS", "RISK_MAX_POSITION_PCT",
+              "RISK_MAX_SYMBOL_NOTIONAL", "RISK_MIN_NOTIONAL"):
+        monkeypatch.delenv(k, raising=False)
+    # Unset -> prior defaults (behaviour unchanged), incl. no absolute cap.
+    d = RiskConfig.from_env()
+    assert d.max_position_pct == 0.20 and d.max_symbol_notional == float("inf")
+
+    monkeypatch.setenv("RISK_MAX_POSITION_PCT", "0.10")
+    monkeypatch.setenv("RISK_MAX_SYMBOL_NOTIONAL", "150")
+    c = RiskConfig.from_env()
+    assert c.max_position_pct == 0.10 and c.max_symbol_notional == 150.0
+    # The absolute cap binds a name a thin book can't absorb.
+    n = RiskManager(RiskConfig(max_symbol_notional=150.0, max_position_pct=1.0,
+                               max_gross=10.0, min_notional=0.0)).size(
+        _book({"A": 1.0}), 10_000)
+    assert np.isclose(abs(n["A"]), 150)
+
+
 def test_risk_manager_is_independent_of_execution_and_venue():
     risk_dir = pathlib.Path(__file__).resolve().parents[1] / "crypto_signal_bot" / "platform" / "risk"
     forbidden = ("execution", "broker", "bybit", "pybit", "crypto_signal_bot.research",

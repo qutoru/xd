@@ -21,6 +21,7 @@ from crypto_signal_bot.platform.execution.bybit_config import BybitConfig, Tradi
 from crypto_signal_bot.platform.notify.notifier import TelegramNotifier
 from crypto_signal_bot.platform.observability.summary import CycleSummary
 from crypto_signal_bot.platform.pipeline import DailyPipeline, PipelineResult, build_default_pipeline
+from crypto_signal_bot.platform.risk.manager import RiskConfig
 from crypto_signal_bot.platform.risk_control.control import RiskControlConfig
 from crypto_signal_bot.platform.risk_control.state import RiskStateStore
 
@@ -180,9 +181,11 @@ def build_trade_pipeline(
 ) -> DailyPipeline:
     """Build the one existing pipeline for the configured mode.
 
-    Risk-control limits come from ``RISK_*`` env vars (RiskControlConfig.from_env);
-    the emergency-stop latch and daily-loss baseline persist to ``RISK_STATE_PATH``
-    so they survive the one-shot process.
+    Position sizing limits come from ``RISK_*`` env vars (RiskConfig.from_env) —
+    per-symbol % of NAV and an absolute per-symbol notional cap. Risk-control
+    limits come from RiskControlConfig.from_env; the emergency-stop latch and
+    daily-loss baseline persist to ``RISK_STATE_PATH`` so they survive the
+    one-shot process.
     """
     return build_default_pipeline(
         signal_names=tuple(signals),
@@ -190,6 +193,7 @@ def build_trade_pipeline(
         bybit_session=session,
         notifier=notifier,
         symbols=list(symbols) or None,
+        risk_config=RiskConfig.from_env(),
         risk_control_config=RiskControlConfig.from_env(),
         risk_state=RiskStateStore(os.getenv("RISK_STATE_PATH", "data/risk_state.json")),
     )
